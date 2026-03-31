@@ -425,10 +425,19 @@ def start_continuous_scanner(auto_trader, interval_minutes: int = 1) -> tuple[th
 
 def run_trader(args: argparse.Namespace) -> None:
     """Start Alpha Trader — full multi-broker trading platform."""
+    # Start web time sync service (syncs at startup + nightly 23:00 CET)
+    try:
+        from src.ops.time_service import start as start_time_service, now_cet as _now_cet
+        start_time_service()
+        _time_str = _now_cet().strftime('%Y-%m-%d %H:%M CET')
+    except Exception as _te:
+        logger.warning(f"[startup] Time service failed: {_te} — using local clock")
+        _time_str = datetime.now(TZ_CET).strftime('%Y-%m-%d %H:%M CET')
+
     logger.info("═══════════════════════════════════════════")
     logger.info("  ALPHA TRADER — Starting")
     logger.info(f"  Mode: {'paper' if args.paper else 'LIVE'}")
-    logger.info(f"  Time: {datetime.now(TZ_CET).strftime('%Y-%m-%d %H:%M CET')}")
+    logger.info(f"  Time: {_time_str} (web-synced)")
     logger.info("═══════════════════════════════════════════")
 
     # 1. Brokers

@@ -42,6 +42,15 @@ from loguru import logger
 
 # ── Timezones ──────────────────────────────────────────────
 TZ_CET = ZoneInfo("Europe/Copenhagen")
+
+
+def _now_cet() -> datetime:
+    """Get CET time from web-synced time service, fallback to local clock."""
+    try:
+        from src.ops.time_service import now_cet
+        return now_cet()
+    except Exception:
+        return _now_cet()
 TZ_ET  = ZoneInfo("America/New_York")
 TZ_UTC = ZoneInfo("UTC")
 
@@ -128,7 +137,7 @@ def _us_holidays(year: int) -> set[date]:
 
 def is_market_day(d: date | None = None) -> bool:
     if d is None:
-        d = datetime.now(TZ_CET).date()
+        d = _now_cet().date()
     if d.weekday() >= 5:
         return False
     year = d.year
@@ -524,7 +533,7 @@ def _weekend_rotation_check() -> dict:
     if not cfg.get("enabled", False):
         return {"skipped": True, "reason": "disabled"}
 
-    now = datetime.now(TZ_CET)
+    now = _now_cet()
     today = now.date()
 
     try:
@@ -738,7 +747,7 @@ def _weekend_rotation_check() -> dict:
 def _data_processor_retrain() -> dict:
     """23:30 CET — Full model retrain on processed data block (weekly)."""
     logger.info("[scheduler] NPU/GPU data processor — weekly full retrain")
-    now = datetime.now(TZ_CET)
+    now = _now_cet()
 
     # Only do full retrain on Sundays (weekly)
     if now.weekday() != 6:
@@ -881,7 +890,7 @@ class DailyScheduler:
         logger.info("[scheduler] Run loop started")
         while not self._stop_event.is_set():
             try:
-                now_cet = datetime.now(TZ_CET)
+                now_cet = _now_cet()
                 for task in self._tasks:
                     if not task.enabled:
                         continue
@@ -897,7 +906,7 @@ class DailyScheduler:
             self._stop_event.wait(30)
 
     def _execute_task(self, task: ScheduledTask) -> TaskResult:
-        started = datetime.now(TZ_CET)
+        started = _now_cet()
         error   = ""
         status  = TaskStatus.COMPLETED
         details = {}
@@ -917,7 +926,7 @@ class DailyScheduler:
                 else:
                     status = TaskStatus.FAILED
 
-        finished = datetime.now(TZ_CET)
+        finished = _now_cet()
         duration = (finished - started).total_seconds()
 
         task.last_run    = finished

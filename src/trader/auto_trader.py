@@ -45,6 +45,15 @@ from src.data.indicators import add_all_indicators
 CET = ZoneInfo("Europe/Copenhagen")
 
 
+def _now_cet() -> datetime:
+    """Get CET time from web-synced time service, fallback to local clock."""
+    try:
+        from src.ops.time_service import now_cet
+        return now_cet()
+    except Exception:
+        return _now_cet()
+
+
 @dataclass
 class TradeAction:
     symbol:           str
@@ -557,7 +566,7 @@ class AutoTrader:
         Applies market handoff adjustments from prior sessions.
         """
         t0  = time.time()
-        now = datetime.now(CET)
+        now = _now_cet()
         self._total_scans += 1
 
         # Periodic cleanup of stale tracking dicts (every 100 scans)
@@ -1231,7 +1240,7 @@ class AutoTrader:
             action.order   = order
             action.executed = True
             self._total_trades                 += 1
-            self._last_trade[action.symbol]     = datetime.now(CET)
+            self._last_trade[action.symbol]     = _now_cet()
 
             # Sync to risk manager portfolio
             if self._risk_manager and hasattr(self._risk_manager, "portfolio"):
@@ -1269,7 +1278,7 @@ class AutoTrader:
         last = self._last_trade.get(symbol)
         if last is None:
             return False
-        elapsed = (datetime.now(CET) - last).total_seconds() / 60
+        elapsed = (_now_cet() - last).total_seconds() / 60
         # Cleanup: remove entries older than 24h to prevent unbounded growth
         if elapsed > 1440:
             del self._last_trade[symbol]
@@ -1278,7 +1287,7 @@ class AutoTrader:
 
     def _cleanup_last_trade(self) -> None:
         """Remove stale entries from _last_trade dict (>24h old)."""
-        now = datetime.now(CET)
+        now = _now_cet()
         stale = [s for s, t in self._last_trade.items()
                  if (now - t).total_seconds() > 86400]
         for s in stale:

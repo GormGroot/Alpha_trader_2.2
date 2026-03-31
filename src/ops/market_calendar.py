@@ -33,6 +33,15 @@ TZ_ET     = ZoneInfo("America/New_York")
 TZ_NZ     = ZoneInfo("Pacific/Auckland")
 TZ_SYDNEY = ZoneInfo("Australia/Sydney")
 TZ_TOKYO  = ZoneInfo("Asia/Tokyo")
+
+
+def _now_cet() -> datetime:
+    """Get CET time from web-synced time service, fallback to local clock."""
+    try:
+        from src.ops.time_service import now_cet
+        return now_cet()
+    except Exception:
+        return _now_cet()
 TZ_HK     = ZoneInfo("Asia/Hong_Kong")
 TZ_INDIA  = ZoneInfo("Asia/Kolkata")
 TZ_LONDON = ZoneInfo("Europe/London")
@@ -283,7 +292,7 @@ def _market_holidays(market: str, year: int) -> set[date]:
 def is_trading_day(market: str, d: date | None = None) -> bool:
     """Check if a given date is a trading day for a market."""
     if d is None:
-        d = datetime.now(TZ_CET).date()
+        d = _now_cet().date()
 
     # Crypto never closes
     if market == "crypto":
@@ -311,7 +320,7 @@ def get_friday_close_schedule(ref_date: date | None = None) -> list[tuple[time, 
     from collections import defaultdict
 
     if ref_date is None:
-        ref_date = datetime.now(TZ_CET).date()
+        ref_date = _now_cet().date()
 
     close_map: dict[time, set[str]] = defaultdict(set)
     for s in MARKET_SESSIONS:
@@ -339,7 +348,7 @@ def next_trading_day(market: str, after: date | None = None) -> date:
     Skips weekends **and** national holidays for the exchange.
     """
     if after is None:
-        after = datetime.now(TZ_CET).date()
+        after = _now_cet().date()
     d = after + timedelta(days=1)
     # Safety limit: 30 days (covers any realistic holiday stretch)
     for _ in range(30):
@@ -358,7 +367,7 @@ def is_last_trading_day_before_break(market: str, d: date | None = None) -> bool
       - Any day before a multi-day holiday stretch
     """
     if d is None:
-        d = datetime.now(TZ_CET).date()
+        d = _now_cet().date()
     if not is_trading_day(market, d):
         return False
     return not is_trading_day(market, d + timedelta(days=1))
@@ -375,7 +384,7 @@ def get_earliest_reopen(after: date | None = None) -> tuple[date, time, str]:
     for a Monday trading day), so we check for Sunday-evening openers.
     """
     if after is None:
-        after = datetime.now(TZ_CET).date()
+        after = _now_cet().date()
 
     SUNDAY_EVENING_CUTOFF = time(18, 0)
 
@@ -459,7 +468,7 @@ class MarketCalendar:
     def get_open_markets(self, now: datetime | None = None) -> list[str]:
         """Return list of currently open markets."""
         if now is None:
-            now = datetime.now(TZ_CET)
+            now = _now_cet()
 
         current_time = now.time()
         today = now.date()
@@ -503,7 +512,7 @@ class MarketCalendar:
     def get_current_session(self, market: str, now: datetime | None = None) -> SessionType:
         """Get the current session type for a specific market."""
         if now is None:
-            now = datetime.now(TZ_CET)
+            now = _now_cet()
         current_time = now.time()
         today = now.date()
 
@@ -528,7 +537,7 @@ class MarketCalendar:
     def get_all_status(self, now: datetime | None = None) -> list[MarketStatus]:
         """Get status for all markets."""
         if now is None:
-            now = datetime.now(TZ_CET)
+            now = _now_cet()
 
         statuses = []
         all_markets = list(MARKET_SYMBOLS.keys())
@@ -574,7 +583,7 @@ class MarketCalendar:
 
     def print_status(self) -> None:
         """Print a human-readable market status overview."""
-        now = datetime.now(TZ_CET)
+        now = _now_cet()
         print(f"\n{'═'*55}")
         print(f"  Market Status — {now:%Y-%m-%d %H:%M CET}")
         print(f"{'═'*55}")
