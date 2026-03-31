@@ -514,14 +514,34 @@ def _exchange_from_symbol(sym: str) -> str:
         return "OMXH"
     if s.endswith(".OL"):
         return "OSE"
-    if s.endswith(".DE"):
+    if s.endswith(".DE") or s.endswith(".F"):
         return "XETRA"
     if s.endswith(".L"):
         return "LSE"
-    if s.endswith(".PA"):
+    if s.endswith(".PA") or s.endswith(".AS") or s.endswith(".BR"):
         return "Euronext"
+    if s.endswith(".AX"):
+        return "ASX"
+    if s.endswith(".NZ"):
+        return "NZX"
+    if s.endswith(".T"):
+        return "TSE"
+    if s.endswith(".HK"):
+        return "HKEX"
+    if s.endswith(".NS"):
+        return "NSE"
+    if s.endswith(".TO"):
+        return "TSX"
+    if s.endswith(".SW"):
+        return "SIX"
+    if s.endswith(".MI"):
+        return "MIL"
+    if s.endswith(".MC"):
+        return "BME"
     if "-USD" in s or s.startswith("BTC") or s.startswith("ETH"):
         return "Crypto"
+    if s.endswith("=F") or s.startswith("/"):
+        return "CME"
     return "NYSE/NASDAQ"
 
 

@@ -137,7 +137,15 @@
     "orders_failed": "Ordreudfærelse fejlede",
     "insufficient_cash": "Ikke nok kontanter til denne ordre",
     "score": "Score",
-    "qty_label": "Antal"
+    "qty_label": "Antal",
+    "cancel_order": "Annullér Ordre",
+    "confirm_cancel": "Ja, annullér",
+    "confirm_cancel_final": "Bekræft annullering",
+    "cancel_confirm_msg": "Er du sikker på at du vil annullere denne ordre?",
+    "cancel_confirm_msg2": "Denne handling kan ikke fortrydes. Bekræft endelig annullering.",
+    "order_cancelled": "Ordre annulleret",
+    "cancel_failed": "Kunne ikke annullere ordre",
+    "exchange_closed_queued": "Børs lukket — ordren er sat i kø og udføres ved åbning"
   },
   "markets": {
     "title": "Market Explorer",

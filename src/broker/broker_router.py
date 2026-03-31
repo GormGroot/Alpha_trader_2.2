@@ -74,6 +74,7 @@ class RoutingConfig:
         ".NS": "NSE",       # National Stock Exchange India
         ".TO": "TSX",       # Toronto
         ".AX": "ASX",       # Australia
+        ".NZ": "NZX",       # New Zealand
     })
 
     # Exchange code → primary broker
@@ -104,6 +105,7 @@ class RoutingConfig:
         "NSE": "ibkr",
         "TSX": "ibkr",
         "ASX": "ibkr",
+        "NZX": "ibkr",
     })
 
     # Exchange → fallback brokers (prøves i rækkefølge efter primary)
@@ -404,10 +406,31 @@ class BrokerRouter(BaseBroker):
     ) -> Order:
         """Sælg via den broker der matcher symbolet.
 
+        For non-short sells, automatically routes to the broker that holds
+        the position (instead of using generic routing which may pick a
+        different broker).
+
         Args:
             short: Hvis True, åbn en short position (sælg uden at eje).
         """
         self._validate_order(symbol, qty, order_type, limit_price)
+
+        # For closing positions (not short-opening), find the broker
+        # that actually holds this position to avoid routing mismatches.
+        if not short and not broker_override:
+            upper = symbol.upper()
+            for name, b in self._brokers.items():
+                try:
+                    for pos in b.get_positions():
+                        if getattr(pos, "symbol", "").upper() == upper and getattr(pos, "qty", 0) > 0:
+                            logger.info(
+                                f"[router] SELL {qty} {symbol} via {name} "
+                                f"(position found in {name}, {order_type.value}, limit={limit_price})"
+                            )
+                            return b.sell(symbol, qty, order_type, limit_price, short=False)
+                except Exception:
+                    continue
+
         broker_name, broker = self.resolve_broker(
             symbol, broker_override=broker_override
         )

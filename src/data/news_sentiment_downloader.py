@@ -22,6 +22,7 @@ import gc
 import json
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -497,6 +498,154 @@ def _process_rss_articles(
 
     conn.commit()
     return stored
+
+
+# ── Continuous Fetcher (background thread) ───────────────
+
+class ContinuousNewsFetcher:
+    """
+    Background thread that cycles through all universe symbols in small
+    batches, fetching news every ``interval_seconds`` (default 300 = 5 min).
+
+    After one full cycle through all symbols it starts over, so sentiment
+    scores stay fresh throughout the day instead of arriving in one nightly
+    bulk download.
+
+    RSS feeds are refreshed once per cycle (after all symbols are done).
+    """
+
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        batch_size: int = 10,
+        interval_seconds: int = 300,
+    ) -> None:
+        self._db_path = db_path or _DB_PATH
+        _init_db(self._db_path)
+        try:
+            universe = AssetUniverse()
+            self._symbols = list(universe.active_symbols)
+        except Exception:
+            self._symbols = []
+        self._batch_size = batch_size
+        self._interval = interval_seconds
+        self._cursor = 0          # rotating index into _symbols
+        self._cycle_count = 0
+        self._articles_total = 0
+        self._running = False
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    # ── public API ───────────────────────────────────────
+
+    def start(self) -> None:
+        if self._running:
+            return
+        if not self._symbols:
+            logger.warning("[news-continuous] No symbols — not starting")
+            return
+        self._running = True
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="ContinuousNewsFetcher",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info(
+            f"[news-continuous] Started — {len(self._symbols)} symbols, "
+            f"batch={self._batch_size}, interval={self._interval}s"
+        )
+
+    def stop(self) -> None:
+        self._running = False
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=10)
+        logger.info("[news-continuous] Stopped")
+
+    @property
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "running": self._running,
+                "cursor": self._cursor,
+                "total_symbols": len(self._symbols),
+                "cycle": self._cycle_count,
+                "articles_total": self._articles_total,
+                "progress_pct": round(
+                    self._cursor / max(len(self._symbols), 1) * 100, 1
+                ),
+            }
+
+    # ── internal ─────────────────────────────────────────
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as e:
+                logger.error(f"[news-continuous] Tick error: {e}")
+            self._stop.wait(self._interval)
+
+    def _tick(self) -> None:
+        n_symbols = len(self._symbols)
+        if n_symbols == 0:
+            return
+
+        # Pick the next batch
+        start = self._cursor
+        end = min(start + self._batch_size, n_symbols)
+        batch = self._symbols[start:end]
+
+        conn = sqlite3.connect(str(self._db_path), timeout=60)
+        articles = 0
+        for symbol in batch:
+            try:
+                n = _backfill_symbol(symbol, conn, use_finbert=False)
+                articles += n
+            except Exception as e:
+                logger.debug(f"[news-continuous] {symbol}: {e}")
+            time.sleep(_DELAY_BETWEEN_TICKERS)
+
+        conn.commit()
+
+        # Advance cursor
+        with self._lock:
+            self._cursor = end
+            self._articles_total += articles
+
+        if articles > 0:
+            logger.debug(
+                f"[news-continuous] Batch {start}-{end}: "
+                f"{articles} new articles"
+            )
+
+        # End of cycle — fetch RSS, aggregate, reset cursor
+        if end >= n_symbols:
+            try:
+                n_rss = _process_rss_articles(conn, self._symbols)
+                if n_rss:
+                    logger.info(f"[news-continuous] RSS: {n_rss} articles matched")
+            except Exception as e:
+                logger.debug(f"[news-continuous] RSS error: {e}")
+
+            try:
+                _aggregate_daily_sentiment(conn)
+            except Exception:
+                pass
+
+            with self._lock:
+                self._cursor = 0
+                self._cycle_count += 1
+
+            logger.info(
+                f"[news-continuous] Cycle {self._cycle_count} complete — "
+                f"{self._articles_total} articles total"
+            )
+
+        conn.close()
 
 
 # ── Main Class ────────────────────────────────────────────

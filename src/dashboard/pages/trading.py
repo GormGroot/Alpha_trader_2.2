@@ -16,13 +16,81 @@ Features:
 from __future__ import annotations
 
 import dash
-from dash import dcc, html, callback, Input, Output, State, no_update
+from dash import dcc, html, callback, Input, Output, State, no_update, ALL
 import dash_bootstrap_components as dbc
 from datetime import datetime
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from loguru import logger
 
 from src.dashboard.i18n import t
+
+
+# ── FX Rate Cache (avoid repeated yfinance calls) ─────────
+_fx_cache: dict[str, tuple[float, float]] = {}  # key → (rate, timestamp)
+_FX_TTL = 300  # 5 minutes
+
+
+def _get_fx_rate(pair: str = "DKK=X", fallback: float = 6.90) -> float:
+    """Get cached FX rate, refresh if stale."""
+    now = time.time()
+    cached = _fx_cache.get(pair)
+    if cached and now - cached[1] < _FX_TTL:
+        return cached[0]
+    try:
+        import yfinance as _yf
+        tk = _yf.Ticker(pair)
+        r = getattr(tk.fast_info, "last_price", None)
+        if r and r > 0:
+            _fx_cache[pair] = (r, now)
+            return r
+    except Exception:
+        pass
+    if cached:
+        return cached[0]  # stale is better than fallback
+    return fallback
+
+
+def _get_latest_price(symbol: str) -> float:
+    """Get latest price for a symbol via yfinance fast_info."""
+    try:
+        import yfinance as _yf
+        tk = _yf.Ticker(symbol)
+        return getattr(tk.fast_info, "last_price", 0) or 0
+    except Exception:
+        return 0.0
+
+
+def _is_exchange_open(symbol: str) -> bool:
+    """Check if the exchange for a symbol is currently open."""
+    try:
+        from src.ops.market_calendar import MarketCalendar
+        cal = MarketCalendar()
+        # Determine market from symbol suffix
+        suffix_map = {
+            ".CO": "eu_nordic", ".ST": "eu_nordic", ".OL": "eu_nordic",
+            ".HE": "eu_nordic", ".DE": "london", ".L": "london",
+            ".PA": "london", ".AS": "london",
+            ".NZ": "new_zealand", ".AX": "australia",
+            ".T": "japan", ".HK": "hong_kong",
+        }
+        upper = symbol.upper()
+        market = None
+        for sfx, mkt in suffix_map.items():
+            if upper.endswith(sfx):
+                market = mkt
+                break
+        if market is None:
+            # Check if crypto
+            if any(upper.startswith(c) for c in ("BTC", "ETH", "SOL", "DOGE", "ADA", "XRP")):
+                return True  # crypto always open
+            market = "us_stocks"
+        open_markets = cal.get_open_markets()
+        return market in open_markets
+    except Exception:
+        return True  # assume open if can't determine
 
 COLORS = {
     "bg": "#0f1117", "card": "#1a1c24", "accent": "#00d4aa",
@@ -262,7 +330,10 @@ def trading_layout() -> html.Div:
                         ),
 
                         # Result
-                        html.Div(id="trade-result", className="mt-3"),
+                        dcc.Loading(
+                            html.Div(id="trade-result", className="mt-3"),
+                            type="circle", color=COLORS["accent"],
+                        ),
 
                     ], style={"backgroundColor": COLORS["card"]}),
                 ], style={"border": f"1px solid {COLORS['border']}", "borderRadius": "8px"}),
@@ -270,7 +341,8 @@ def trading_layout() -> html.Div:
 
             # Open Orders + Recent Trades (højre)
             dbc.Col([
-                # Open Orders
+                # Open Orders — live refresh every 10s
+                dcc.Interval(id="open-orders-interval", interval=10_000, n_intervals=0),
                 dbc.Card([
                     dbc.CardHeader(
                         html.H5(t('trading.open_orders'), className="mb-0"),
@@ -286,6 +358,33 @@ def trading_layout() -> html.Div:
                     ),
                 ], style={"border": f"1px solid {COLORS['border']}", "borderRadius": "8px"},
                    className="mb-4"),
+
+                # Cancel confirmation modal — two-layer
+                dbc.Modal([
+                    dbc.ModalHeader(dbc.ModalTitle(t('trading.cancel_order'), id="cancel-modal-title"), close_button=True),
+                    dbc.ModalBody(id="cancel-modal-body"),
+                    dbc.ModalFooter([
+                        dbc.Button(t('common.cancel'), id="cancel-modal-dismiss-btn",
+                                   color="secondary", className="me-2"),
+                        dbc.Button(t('trading.confirm_cancel'), id="cancel-modal-step1-btn",
+                                   color="warning"),
+                    ]),
+                ], id="cancel-order-modal", is_open=False, centered=True),
+
+                # Second confirmation modal
+                dbc.Modal([
+                    dbc.ModalHeader(dbc.ModalTitle(t('trading.cancel_order')), close_button=True),
+                    dbc.ModalBody(id="cancel-modal2-body"),
+                    dbc.ModalFooter([
+                        dbc.Button(t('common.cancel'), id="cancel-modal2-dismiss-btn",
+                                   color="secondary", className="me-2"),
+                        dbc.Button(t('trading.confirm_cancel_final'), id="cancel-modal2-confirm-btn",
+                                   color="danger"),
+                    ]),
+                ], id="cancel-order-modal2", is_open=False, centered=True),
+
+                dcc.Store(id="cancel-order-store", data=None),
+                html.Div(id="cancel-order-result", style={"display": "none"}),
 
                 # Recent Trades — pre-rendered with fixed height to prevent layout shift
                 dbc.Card([
@@ -360,7 +459,10 @@ def trading_layout() -> html.Div:
         dcc.Store(id="quick-trade-action-store", data=None),
         dcc.Store(id="quick-trade-prices-store", data=None),
         dcc.Store(id="quick-trade-cash-store", data=None),
-        html.Div(id="quick-trade-result", className="mt-3"),
+        dcc.Loading(
+            html.Div(id="quick-trade-result", className="mt-3"),
+            type="circle", color=COLORS["accent"],
+        ),
 
     ], style={"padding": "20px", "backgroundColor": COLORS["bg"]})
 
@@ -446,34 +548,18 @@ def register_trading_callbacks(app: object) -> None:
             return ""
         qty = max(int(qty or 0), 0)
 
-        # Fetch price
-        price_usd = 0.0
-        try:
-            import yfinance as _yf_ti
-            tk = _yf_ti.Ticker(symbol)
-            price_usd = getattr(tk.fast_info, "last_price", 0) or 0
-        except Exception:
-            pass
-
-        # FX rate
-        usd_dkk = 6.90
-        try:
-            import yfinance as _yf_fx
-            fx = _yf_fx.Ticker("DKK=X")
-            r = getattr(fx.fast_info, "last_price", None)
-            if r and r > 0:
-                usd_dkk = r
-        except Exception:
-            pass
+        price_usd = _get_latest_price(symbol)
+        usd_dkk = _get_fx_rate()
 
         price_dkk = price_usd * usd_dkk
 
         # Cash
         cash_dkk = 0.0
         try:
-            from src.broker.paper_broker import PaperBroker
-            pb = PaperBroker()
-            cash_dkk = pb.get_account().cash * usd_dkk
+            from src.broker.registry import get_router
+            router = get_router()
+            if router:
+                cash_dkk = router.get_account().cash * usd_dkk
         except Exception:
             pass
 
@@ -682,11 +768,25 @@ def register_trading_callbacks(app: object) -> None:
             if router is None:
                 raise RuntimeError("No broker available — trader may not be running")
 
-            # Convert string to OrderType enum
-            ot = OrderType.LIMIT if order_type == "limit" else OrderType.MARKET
-
             sym = symbol.upper()
             lp = float(limit_price) if limit_price and order_type == "limit" else None
+
+            # If exchange is closed and it's a market order, convert to limit
+            # order so it queues as a pending order
+            exchange_open = _is_exchange_open(sym)
+            if not exchange_open and order_type == "market":
+                # Use last known price as limit so it fills on open
+                last_price = _get_latest_price(sym)
+                if last_price > 0:
+                    lp = last_price
+                    ot = OrderType.LIMIT
+                    queued = True
+                else:
+                    ot = OrderType.MARKET
+                    queued = False
+            else:
+                ot = OrderType.LIMIT if order_type == "limit" else OrderType.MARKET
+                queued = False
 
             if side == "buy":
                 order = router.buy(symbol=sym, qty=float(qty), order_type=ot, limit_price=lp)
@@ -702,14 +802,24 @@ def register_trading_callbacks(app: object) -> None:
                     pass
 
                 if is_short:
-                    # Cover the short by buying
                     order = router.buy(symbol=sym, qty=float(qty), order_type=ot, limit_price=lp)
                 else:
                     order = router.sell(symbol=sym, qty=float(qty), order_type=ot, limit_price=lp)
 
+            status = getattr(order, "status", None)
+            status_val = getattr(status, "value", str(status)) if status else "unknown"
+
+            if queued or status_val in ("submitted", "pending"):
+                return dbc.Alert([
+                    html.Strong(f"{t('trading.open_orders')}: "),
+                    html.Span(f"{t('common.buy') if side == 'buy' else t('common.sell')} {qty} × {sym} ({t('common.limit')} @ {lp:.2f})"),
+                    html.Div(t('trading.exchange_closed_queued'), style={"fontSize": "0.85rem", "color": COLORS["orange"]}),
+                    html.Div(f"{t('trading.order_id')}: {getattr(order, 'order_id', 'N/A')}", style={"fontSize": "0.85rem"}),
+                ], color="warning", duration=20000)
+
             return dbc.Alert([
                 html.Strong(f"{t('trading.order_placed')} "),
-                html.Span(f"{t('common.buy') if side == 'buy' else t('common.sell')} {qty} × {symbol.upper()} ({order_type})"),
+                html.Span(f"{t('common.buy') if side == 'buy' else t('common.sell')} {qty} × {sym} ({order_type})"),
                 html.Div(f"{t('trading.order_id')}: {getattr(order, 'order_id', 'N/A')}", style={"fontSize": "0.85rem"}),
             ], color="success", duration=15000)
 
@@ -740,14 +850,68 @@ def register_trading_callbacks(app: object) -> None:
     # ── Quick Trade: Buy/Sell Top 10 callbacks ────────────────
 
     def _get_top_recommendations(side: str, limit: int = 10):
-        """Get top buy or sell candidates from cached scanner data."""
+        """Get top buy or sell candidates from cached scanner data.
+
+        Falls back to building recommendations from current positions (sell)
+        or from the auto-trader watchlist (buy) when scanner cache is empty.
+        """
         try:
             from src.dashboard.app import _cache
             result = _cache.get("scanner_result")
-            if not result:
-                return []
-            picks = result.top_buys if side == "buy" else result.top_sells
-            return picks[:limit]
+            if result:
+                picks = result.top_buys if side == "buy" else result.top_sells
+                if picks:
+                    return picks[:limit]
+        except Exception:
+            pass
+
+        # Fallback: build recommendations from live data
+        try:
+            if side == "sell":
+                # For sell: recommend selling current positions
+                from src.broker.registry import get_router
+                from src.strategy.market_scanner import ScoredAsset
+                router = get_router()
+                if not router:
+                    return []
+                positions = router.get_positions()
+                picks = []
+                for pos in positions:
+                    sym = getattr(pos, "symbol", "")
+                    qty = getattr(pos, "qty", 0)
+                    pnl_pct = getattr(pos, "unrealized_pnl_pct", 0) or 0
+                    if qty > 0 and sym:
+                        picks.append(ScoredAsset(
+                            symbol=sym,
+                            score=50 + pnl_pct * 100,
+                            change_pct=pnl_pct * 100,
+                            reasons=[f"{qty:.0f} shares held"],
+                        ))
+                return sorted(picks, key=lambda a: a.score)[:limit]
+            else:
+                # For buy: try auto-trader watchlist or active market symbols
+                from src.broker.registry import get_auto_trader
+                from src.strategy.market_scanner import ScoredAsset
+                auto = get_auto_trader()
+                if auto and hasattr(auto, "watchlist") and auto.watchlist:
+                    symbols = list(auto.watchlist)[:limit]
+                else:
+                    from src.ops.market_calendar import MarketCalendar, MARKET_SYMBOLS
+                    cal = MarketCalendar()
+                    open_markets = cal.get_open_markets()
+                    symbols = []
+                    for m in open_markets:
+                        symbols.extend(MARKET_SYMBOLS.get(m, []))
+                    symbols = symbols[:limit]
+                picks = []
+                for sym in symbols:
+                    picks.append(ScoredAsset(
+                        symbol=sym,
+                        score=50,
+                        change_pct=0,
+                        reasons=["from watchlist"],
+                    ))
+                return picks
         except Exception:
             return []
 
@@ -811,38 +975,38 @@ def register_trading_callbacks(app: object) -> None:
 
         # Get cash and FX rate for buy side
         cash_dkk = 0.0
-        usd_dkk = 6.90
+        usd_dkk = _get_fx_rate()
         if side == "buy":
             try:
-                from src.broker.paper_broker import PaperBroker
-                pb = PaperBroker()
-                cash_dkk = pb.get_account().cash
+                from src.broker.registry import get_router
+                _router = get_router()
+                if _router:
+                    cash_dkk = _router.get_account().cash * usd_dkk
             except Exception:
                 pass
-            try:
-                import yfinance as _yf
-                _fx = _yf.Ticker("DKK=X")
-                _r = getattr(_fx.fast_info, "last_price", None)
-                if _r and _r > 0:
-                    usd_dkk = _r
-            except Exception:
-                pass
-            cash_dkk *= usd_dkk
 
-        # Fetch prices and build rows
+        # Fetch prices in parallel for buy side (major perf improvement)
         rows = []
         total_commit = 0.0
         buy_prices_dkk = []
+        price_map: dict[str, float] = {}
+        if side == "buy":
+            symbols_to_fetch = [a.symbol for a in picks]
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_get_latest_price, sym): sym for sym in symbols_to_fetch}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        price_map[sym] = fut.result()
+                    except Exception:
+                        price_map[sym] = 0.0
+
         for idx, a in enumerate(picks):
             reason = a.reasons[0] if a.reasons else ""
             price_dkk = 0.0
             if side == "buy":
-                try:
-                    import yfinance as _yf2
-                    _tk = _yf2.Ticker(a.symbol)
-                    price_dkk = (getattr(_tk.fast_info, "last_price", 0) or 0) * usd_dkk
-                except Exception:
-                    pass
+                price_usd = price_map.get(a.symbol, 0.0)
+                price_dkk = price_usd * usd_dkk
                 buy_prices_dkk.append(round(price_dkk, 2))
                 total_commit += price_dkk
 
@@ -997,44 +1161,38 @@ def register_trading_callbacks(app: object) -> None:
             results = []
             done = 0
 
-            # Get FX rate for DKK display
-            _usd_dkk = 6.90
-            try:
-                import yfinance as _yf_exec
-                _fx = _yf_exec.Ticker("DKK=X")
-                _r = getattr(_fx.fast_info, "last_price", None)
-                if _r and _r > 0:
-                    _usd_dkk = _r
-            except Exception:
-                pass
+            _usd_dkk = _get_fx_rate()
 
             if side == "buy":
-                # Use quantities from the input fields
                 for i, sym in enumerate(symbols):
                     qty = max(int((buy_qtys[i] if buy_qtys and i < len(buy_qtys) else 1) or 0), 0)
                     if qty == 0:
                         continue
                     try:
-                        from src.data.market_data import MarketDataFetcher
-                        mdf = MarketDataFetcher()
-                        df = mdf.get_historical(sym, interval="1d", lookback_days=5)
-                        if df.empty:
+                        price = _get_latest_price(sym)
+                        if price <= 0:
                             results.append(html.Li(f"\u2717 {sym}: no price data",
                                                    style={"color": COLORS["red"]}))
                             continue
-                        price = float(df["Close"].iloc[-1])
                         price_dkk = price * _usd_dkk
-                        order = router.buy(symbol=sym, qty=qty, order_type=OrderType.MARKET)
-                        results.append(html.Li(
-                            f"\u2713 {t('common.buy')} {qty} \u00d7 {sym} @ {price_dkk:,.0f} kr",
-                            style={"color": COLORS["text"]}))
+
+                        # Queue as limit order if exchange is closed
+                        if _is_exchange_open(sym):
+                            order = router.buy(symbol=sym, qty=qty, order_type=OrderType.MARKET)
+                            results.append(html.Li(
+                                f"\u2713 {t('common.buy')} {qty} \u00d7 {sym} @ {price_dkk:,.0f} kr",
+                                style={"color": COLORS["text"]}))
+                        else:
+                            order = router.buy(symbol=sym, qty=qty, order_type=OrderType.LIMIT, limit_price=price)
+                            results.append(html.Li(
+                                f"\u23f3 {t('common.buy')} {qty} \u00d7 {sym} @ {price_dkk:,.0f} kr (queued)",
+                                style={"color": COLORS["orange"]}))
                         done += 1
                     except Exception as exc:
                         results.append(html.Li(f"\u2717 {sym}: {exc}",
                                                style={"color": COLORS["red"]}))
 
             elif side == "sell":
-                # Sell positions we hold
                 positions = list(router.get_positions())
                 pos_map = {getattr(p, "symbol", ""): p for p in positions}
 
@@ -1048,10 +1206,21 @@ def register_trading_callbacks(app: object) -> None:
                         qty = getattr(pos, "qty", 0)
                         if qty <= 0:
                             continue
-                        router.sell(symbol=sym, qty=qty, order_type=OrderType.MARKET)
-                        results.append(html.Li(
-                            f"\u2713 {t('common.sell')} {qty:.2f} \u00d7 {sym}",
-                            style={"color": COLORS["text"]}))
+                        # Queue as limit order if exchange is closed
+                        if _is_exchange_open(sym):
+                            router.sell(symbol=sym, qty=qty, order_type=OrderType.MARKET)
+                            results.append(html.Li(
+                                f"\u2713 {t('common.sell')} {qty:.2f} \u00d7 {sym}",
+                                style={"color": COLORS["text"]}))
+                        else:
+                            price = _get_latest_price(sym)
+                            if price > 0:
+                                router.sell(symbol=sym, qty=qty, order_type=OrderType.LIMIT, limit_price=price)
+                            else:
+                                router.sell(symbol=sym, qty=qty, order_type=OrderType.MARKET)
+                            results.append(html.Li(
+                                f"\u23f3 {t('common.sell')} {qty:.2f} \u00d7 {sym} (queued)",
+                                style={"color": COLORS["orange"]}))
                         done += 1
                     except Exception as exc:
                         results.append(html.Li(f"\u2717 {sym}: {exc}",
@@ -1068,3 +1237,220 @@ def register_trading_callbacks(app: object) -> None:
         except Exception as exc:
             logger.error(f"Quick trade failed: {exc}")
             return dbc.Alert(f"{t('trading.orders_failed')}: {exc}", color="danger", dismissable=True)
+
+    # ── Open Orders: live refresh ──────────────────────────────
+
+    @app.callback(
+        Output("trading-open-orders", "children"),
+        Output("trading-open-orders", "style"),
+        Input("open-orders-interval", "n_intervals"),
+        Input("trade-result", "children"),       # refresh after placing an order
+        Input("cancel-order-result", "children"),  # refresh after cancel
+    )
+    def _refresh_open_orders(_n, _trade_result, _cancel_result):
+        """Poll all brokers for pending/submitted orders."""
+        try:
+            from src.broker.registry import get_router
+            router = get_router()
+            if not router:
+                return t('trading.no_open_orders'), {"color": COLORS["muted"], "textAlign": "center", "padding": "20px"}
+
+            pending_orders = []
+            for broker_name, broker in router._brokers.items():
+                try:
+                    # PaperBroker stores orders in _orders dict
+                    orders_dict = getattr(broker, "_orders", {})
+                    for oid, order in orders_dict.items():
+                        status = getattr(order, "status", None)
+                        status_val = getattr(status, "value", str(status)) if status else ""
+                        if status_val in ("pending", "submitted"):
+                            pending_orders.append((broker_name, order))
+                except Exception:
+                    pass
+
+            if not pending_orders:
+                return t('trading.no_open_orders'), {"color": COLORS["muted"], "textAlign": "center", "padding": "20px"}
+
+            rows = []
+            for broker_name, order in pending_orders:
+                side_val = getattr(order.side, "value", str(order.side)) if order.side else "?"
+                side_color = COLORS["green"] if side_val.lower() == "buy" else COLORS["red"]
+                submitted = getattr(order, "submitted_at", "") or ""
+                time_str = submitted[11:16] if len(submitted) > 16 else submitted[:16]
+
+                rows.append(html.Tr([
+                    html.Td(time_str, style={"color": COLORS["muted"], "fontSize": "0.8rem"}),
+                    html.Td(getattr(order, "symbol", ""), style={"color": COLORS["accent"]}),
+                    html.Td(side_val.upper(), style={"color": side_color, "fontWeight": "bold"}),
+                    html.Td(f"{getattr(order, 'qty', 0):.0f}", style={"color": COLORS["text"]}),
+                    html.Td(
+                        f"@ {getattr(order, 'limit_price', 0):.2f}" if getattr(order, "limit_price", None) else "MKT",
+                        style={"color": COLORS["muted"]}
+                    ),
+                    html.Td(broker_name, style={"color": COLORS["muted"], "fontSize": "0.8rem"}),
+                    html.Td(
+                        dbc.Button(
+                            t('common.cancel'),
+                            id={"type": "cancel-order-btn", "index": getattr(order, "order_id", "")},
+                            color="danger",
+                            size="sm",
+                            outline=True,
+                        ),
+                    ),
+                ], style={"borderBottom": f"1px solid {COLORS['border']}"}))
+
+            header = html.Thead(html.Tr([
+                html.Th(h, style={"color": COLORS["muted"], "padding": "6px", "fontSize": "0.8rem"})
+                for h in [t('common.time'), t('common.symbol'), t('common.side'),
+                          t('common.quantity'), t('common.price'), "Broker", ""]
+            ]))
+
+            table = html.Table([header, html.Tbody(rows)], style={
+                "width": "100%", "color": COLORS["text"], "fontSize": "0.9rem",
+            })
+
+            return table, {"padding": "10px"}
+
+        except Exception as exc:
+            logger.error(f"Open orders refresh error: {exc}")
+            return t('trading.no_open_orders'), {"color": COLORS["muted"], "textAlign": "center", "padding": "20px"}
+
+    # ── Cancel Order: Step 1 — show first confirmation modal ──
+
+    @app.callback(
+        Output("cancel-order-modal", "is_open"),
+        Output("cancel-modal-body", "children"),
+        Output("cancel-order-store", "data"),
+        Input({"type": "cancel-order-btn", "index": ALL}, "n_clicks"),
+        Input("cancel-modal-dismiss-btn", "n_clicks"),
+        Input("cancel-modal-step1-btn", "n_clicks"),
+        State("cancel-order-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _cancel_order_step1(cancel_clicks, dismiss_click, step1_click, stored_order_id):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            return no_update, no_update, no_update
+        trigger = ctx.triggered[0]["prop_id"]
+
+        # Dismiss button
+        if "cancel-modal-dismiss-btn" in trigger:
+            return False, "", None
+
+        # Step 1 confirm → close modal 1, open modal 2
+        if "cancel-modal-step1-btn" in trigger:
+            return False, "", stored_order_id
+
+        # Cancel button clicked on a specific order
+        if "cancel-order-btn" in trigger:
+            # Extract order_id from the pattern-match trigger
+            import json
+            try:
+                prop = ctx.triggered[0]["prop_id"]
+                # Format: {"index":"paper-xxxx","type":"cancel-order-btn"}.n_clicks
+                json_part = prop.split(".")[0]
+                parsed = json.loads(json_part)
+                order_id = parsed.get("index", "")
+            except Exception:
+                return no_update, no_update, no_update
+
+            # Don't open if no actual click (initial callback noise)
+            if not any(c for c in (cancel_clicks or []) if c):
+                return no_update, no_update, no_update
+
+            # Look up order details
+            order_info = ""
+            try:
+                from src.broker.registry import get_router
+                router = get_router()
+                for _bname, broker in router._brokers.items():
+                    orders_dict = getattr(broker, "_orders", {})
+                    if order_id in orders_dict:
+                        o = orders_dict[order_id]
+                        side_val = getattr(o.side, "value", str(o.side))
+                        order_info = f"{side_val.upper()} {getattr(o, 'qty', 0):.0f} × {getattr(o, 'symbol', '')}"
+                        break
+            except Exception:
+                order_info = order_id
+
+            body = html.Div([
+                html.P(t('trading.cancel_confirm_msg'), className="text-warning fw-bold"),
+                html.P(order_info, style={"color": COLORS["accent"], "fontSize": "1.1rem", "fontWeight": "bold"}),
+                html.P(f"Order ID: {order_id}", style={"color": COLORS["muted"], "fontSize": "0.85rem"}),
+            ])
+
+            return True, body, order_id
+
+        return no_update, no_update, no_update
+
+    # ── Cancel Order: Step 2 — second confirmation ──
+
+    @app.callback(
+        Output("cancel-order-modal2", "is_open"),
+        Output("cancel-modal2-body", "children"),
+        Input("cancel-modal-step1-btn", "n_clicks"),
+        Input("cancel-modal2-dismiss-btn", "n_clicks"),
+        Input("cancel-modal2-confirm-btn", "n_clicks"),
+        State("cancel-order-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _cancel_order_step2(step1_click, dismiss_click, confirm_click, order_id):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            return no_update, no_update
+        trigger = ctx.triggered[0]["prop_id"]
+
+        if "cancel-modal2-dismiss-btn" in trigger:
+            return False, ""
+
+        if "cancel-modal2-confirm-btn" in trigger:
+            return False, ""
+
+        if "cancel-modal-step1-btn" in trigger and order_id:
+            body = html.Div([
+                html.P(t('trading.cancel_confirm_msg2'),
+                       className="text-danger fw-bold", style={"fontSize": "1.1rem"}),
+                html.P(f"Order ID: {order_id}", style={"color": COLORS["muted"]}),
+            ])
+            return True, body
+
+        return no_update, no_update
+
+    # ── Cancel Order: Step 3 — execute cancellation ──
+
+    @app.callback(
+        Output("cancel-order-result", "children"),
+        Input("cancel-modal2-confirm-btn", "n_clicks"),
+        State("cancel-order-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _execute_cancel(n_clicks, order_id):
+        if not n_clicks or not order_id:
+            return no_update
+
+        try:
+            from src.broker.registry import get_router
+            router = get_router()
+            if not router:
+                return ""
+
+            cancelled = False
+            for _bname, broker in router._brokers.items():
+                try:
+                    if hasattr(broker, "cancel_order"):
+                        result = broker.cancel_order(order_id)
+                        if result:
+                            cancelled = True
+                            logger.info(f"[trading] Cancelled order {order_id} via {_bname}")
+                            break
+                except Exception:
+                    continue
+
+            if cancelled:
+                return t('trading.order_cancelled')
+            else:
+                logger.warning(f"[trading] Could not cancel order {order_id}")
+                return t('trading.cancel_failed')
+        except Exception as exc:
+            logger.error(f"Cancel order error: {exc}")
+            return str(exc)

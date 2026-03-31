@@ -674,11 +674,31 @@ def generate_performance_report() -> bytes:
             if sl_key and sl_key in _sl_map:
                 sl_label += " (custom)"
 
+            # Count news articles for this exchange's symbols
+            _article_count = 0
+            try:
+                import sqlite3 as _sq3
+                from pathlib import Path as _Pa
+                _ndb = _Pa("data_cache/news_sentiment.db")
+                if _ndb.exists():
+                    with _sq3.connect(_ndb) as _nc:
+                        _syms = [p["symbol"] for p in positions]
+                        _ph = ",".join("?" * len(_syms))
+                        _row = _nc.execute(
+                            f"SELECT COALESCE(SUM(news_count), 0) FROM daily_sentiment WHERE symbol IN ({_ph})",
+                            _syms
+                        ).fetchone()
+                        _article_count = _row[0] if _row else 0
+            except Exception:
+                pass
+
+            _art_label = f", {_article_count:,} artikler" if _article_count > 0 else ""
+
             pdf.set_font("Helvetica", "B", 10)
             pdf.set_text_color(0, 0, 0)
             pdf.cell(0, 7,
                      f"{group_name}  -  {len(positions)} positions, "
-                     f"value ${group_value:,.0f}, P&L ${group_pnl:+,.0f}  |  {sl_label}",
+                     f"value ${group_value:,.0f}, P&L ${group_pnl:+,.0f}{_art_label}  |  {sl_label}",
                      new_x="LMARGIN", new_y="NEXT")
 
             # Exchange description

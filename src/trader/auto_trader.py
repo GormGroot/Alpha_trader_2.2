@@ -202,6 +202,20 @@ class AutoTrader:
         self._exchange_stop_loss: dict[str, float] = {}  # market -> stop-loss %
         self._load_exchange_stop_loss()
 
+        # Continuous news sentiment (replaces nightly bulk download)
+        self._news_fetcher = None
+        try:
+            from src.data.news_sentiment_downloader import ContinuousNewsFetcher
+            self._news_fetcher = ContinuousNewsFetcher(
+                db_path=Path(data_dir) / "news_sentiment.db",
+                batch_size=10,
+                interval_seconds=300,
+            )
+            self._news_fetcher.start()
+            logger.info("[auto] ContinuousNewsFetcher started (every 5 min)")
+        except Exception as e:
+            logger.warning(f"[auto] ContinuousNewsFetcher not available: {e}")
+
         # Feedback loop: ContinuousLearner adjusts thresholds
         self._learner = None
         try:

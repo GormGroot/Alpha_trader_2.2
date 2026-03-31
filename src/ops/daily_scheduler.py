@@ -455,16 +455,17 @@ def _maintenance() -> dict:
     except Exception as e:
         logger.warning(f"[scheduler] Log archival failed: {e}")
 
-    # News sentiment daily update
+    # News sentiment: handled by ContinuousNewsFetcher (every 5 min)
+    # Nightly maintenance just triggers a re-aggregation of daily scores
     try:
-        from src.data.news_sentiment_downloader import NewsSentimentDownloader
-        nsd = NewsSentimentDownloader()
-        nsd_stats = nsd.run_daily_update()
+        from src.data.news_sentiment_downloader import _aggregate_daily_sentiment, _DB_PATH
+        import sqlite3
+        with sqlite3.connect(str(_DB_PATH), timeout=60) as _ns_conn:
+            _aggregate_daily_sentiment(_ns_conn)
         results["news_sentiment_ok"] = True
-        results["news_sentiment_articles"] = nsd_stats.get("articles", 0)
-        logger.info(f"[scheduler] News sentiment updated: {nsd_stats}")
+        logger.info("[scheduler] News sentiment daily aggregation done")
     except Exception as e:
-        logger.warning(f"News sentiment update failed: {e}")
+        logger.warning(f"News sentiment aggregation failed: {e}")
         results["news_sentiment_ok"] = False
 
     # Reset daily handoff data

@@ -137,7 +137,15 @@
     "orders_failed": "Order execution failed",
     "insufficient_cash": "Insufficient cash for this order",
     "score": "Score",
-    "qty_label": "Qty"
+    "qty_label": "Qty",
+    "cancel_order": "Cancel Order",
+    "confirm_cancel": "Yes, cancel",
+    "confirm_cancel_final": "Confirm cancellation",
+    "cancel_confirm_msg": "Are you sure you want to cancel this order?",
+    "cancel_confirm_msg2": "This action cannot be undone. Confirm final cancellation.",
+    "order_cancelled": "Order cancelled",
+    "cancel_failed": "Could not cancel order",
+    "exchange_closed_queued": "Exchange closed — order queued, will execute at market open"
   },
   "markets": {
     "title": "Market Explorer",

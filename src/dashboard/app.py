@@ -224,6 +224,49 @@ def _start_preload() -> None:
 _start_preload()
 
 
+# ── Periodic background refresh (every 5 min) ─────────────
+_BG_REFRESH_INTERVAL = 300  # seconds
+
+def _background_refresh_worker():
+    """Periodically refresh cached data so pages load instantly."""
+    import time as _time
+    _time.sleep(60)  # wait 1 min after startup before first refresh
+    while True:
+        try:
+            # Refresh scanner data (used by markedsoverblik, trading quick trades)
+            if not _scanner_state.get("loading"):
+                try:
+                    _fetch_scanner_data_sync()
+                    logger.debug("[bg-refresh] Scanner data refreshed")
+                except Exception:
+                    pass
+
+            # Refresh backtests (used by overblik, risiko, strategier)
+            try:
+                _cache.pop("backtests", None)
+                _run_backtests()
+                logger.debug("[bg-refresh] Backtests refreshed")
+            except Exception:
+                pass
+
+            # Refresh benchmark (used by overblik equity chart)
+            try:
+                _cache.pop("benchmark", None)
+                _get_benchmark()
+                logger.debug("[bg-refresh] Benchmark refreshed")
+            except Exception:
+                pass
+
+        except Exception as exc:
+            logger.warning(f"[bg-refresh] Error: {exc}")
+
+        _time.sleep(_BG_REFRESH_INTERVAL)
+
+
+_bg_refresh_thread = _threading.Thread(target=_background_refresh_worker, daemon=True, name="bg-refresh")
+_bg_refresh_thread.start()
+
+
 # ── Plotly-hjælpere ───────────────────────────────────────────
 
 
@@ -401,13 +444,19 @@ app.layout = html.Div([
     dcc.Interval(id="auto-refresh", interval=60 * 1000, n_intervals=0),
     dcc.Interval(id="fx-refresh", interval=30 * 60 * 1000, n_intervals=0),  # 30 min FX refresh
     sidebar,
-    html.Div(id="page-content", style={
-        "marginLeft": "220px",
-        "padding": "24px",
-        "backgroundColor": COLORS["bg"],
-        "minHeight": "100vh",
-        "transition": "none",
-    }),
+    dcc.Loading(
+        html.Div(id="page-content", style={
+            "marginLeft": "220px",
+            "padding": "24px",
+            "backgroundColor": COLORS["bg"],
+            "minHeight": "100vh",
+            "transition": "none",
+        }),
+        type="circle",
+        color=COLORS["accent"],
+        fullscreen=False,
+        style={"marginLeft": "220px"},
+    ),
 
     # ── Weekend Crypto Rollover Approval Modal ──
     dcc.Interval(id="weekend-approval-poll", interval=15 * 1000, n_intervals=0),
@@ -467,12 +516,34 @@ def page_overview():
     best = backtests[best_name]
     spy = _get_benchmark()
 
+    # Use LIVE portfolio value (not backtest) for the portfolio KPI card
+    _live_equity_usd = best.final_equity  # fallback to backtest
+    _live_return_pct = best.total_return_pct
+    try:
+        from src.broker.registry import get_router
+        _router = get_router()
+        if _router:
+            _live_acc = _router.get_account()
+            if _live_acc and _live_acc.equity > 0:
+                _live_equity_usd = _live_acc.equity
+                # Compute return % based on initial capital (typically 100k)
+                _initial = getattr(_router, "_initial_capital", 100_000)
+                # Try to get from paper broker
+                for _bn, _bk in _router._brokers.items():
+                    if hasattr(_bk, "_initial_capital"):
+                        _initial = _bk._initial_capital
+                        break
+                if _initial > 0:
+                    _live_return_pct = (_live_equity_usd / _initial - 1) * 100
+    except Exception:
+        pass
+
     # KPI-kort
     kpi_row = dbc.Row([
         dbc.Col(_metric_card(
             t('analysis.portfolio_value'),
-            format_value(best.final_equity),
-            f"{best.total_return_pct:+.2f}%",
+            format_value(_live_equity_usd),
+            f"{_live_return_pct:+.2f}%",
             COLORS["accent"],
         ), xs=6, md=3),
         dbc.Col(_metric_card(
@@ -1135,13 +1206,25 @@ def page_strategies():
     total_trades = len(closed_trades)
     winners = [t for t in closed_trades if t["realized_pnl"] > 0]
     losers = [t for t in closed_trades if t["realized_pnl"] <= 0]
-    total_pnl = sum(t["realized_pnl"] for t in closed_trades)
+    realized_pnl = sum(t["realized_pnl"] for t in closed_trades)
     win_rate = len(winners) / total_trades * 100 if total_trades else 0
     avg_win = sum(t["realized_pnl"] for t in winners) / len(winners) if winners else 0
     avg_loss = sum(abs(t["realized_pnl"]) for t in losers) / len(losers) if losers else 0
     gross_wins = sum(t["realized_pnl"] for t in winners)
     gross_losses = abs(sum(t["realized_pnl"] for t in losers))
     profit_factor = gross_wins / gross_losses if gross_losses > 0 else float("inf")
+
+    # Include unrealized P&L from open positions for total P&L
+    unrealized_pnl = 0.0
+    try:
+        from src.broker.registry import get_router
+        _router = get_router()
+        if _router:
+            for pos in _router.get_positions():
+                unrealized_pnl += getattr(pos, "unrealized_pnl", 0) or 0
+    except Exception:
+        pass
+    total_pnl = realized_pnl + unrealized_pnl
 
     # ── Strategy weights table ──────────────────────────────
     strat_rows = []
@@ -1163,12 +1246,15 @@ def page_strategies():
 
     # ── KPI cards ───────────────────────────────────────────
     pnl_color = COLORS["green"] if total_pnl >= 0 else COLORS["red"]
+    # Format P&L values in the user's display currency
+    _pnl_sign = "+" if total_pnl >= 0 else ""
+    _win_sign = "+" if avg_win >= 0 else ""
     kpi_row = dbc.Row([
         dbc.Col(_kpi_card(t('analysis.number_of_trades'), str(total_trades)), width=2),
         dbc.Col(_kpi_card("Win Rate", f"{win_rate:.1f}%"), width=2),
-        dbc.Col(_kpi_card("Total P&L", f"${total_pnl:+,.0f}"), width=2),
-        dbc.Col(_kpi_card("Avg Win", f"${avg_win:+,.0f}"), width=2),
-        dbc.Col(_kpi_card("Avg Loss", f"${avg_loss:,.0f}"), width=2),
+        dbc.Col(_kpi_card("Total P&L", f"{_pnl_sign}{format_value(total_pnl)}"), width=2),
+        dbc.Col(_kpi_card("Avg Win", f"{_win_sign}{format_value(avg_win)}"), width=2),
+        dbc.Col(_kpi_card("Avg Loss", format_value(avg_loss)), width=2),
         dbc.Col(_kpi_card("Profit Factor", f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞"), width=2),
     ], className="mb-4")
 
@@ -1295,8 +1381,8 @@ def page_risk():
             html.Td(f"{r.sharpe_ratio:.2f}"),
             html.Td(f"{r.sortino_ratio:.2f}"),
             html.Td(f"{r.calmar_ratio:.2f}"),
-            html.Td(f"${r.total_commission:,.2f}"),
-            html.Td(f"${r.avg_loss:,.2f}" if r.avg_loss else "–"),
+            html.Td(format_value(r.total_commission, 2)),
+            html.Td(format_value(r.avg_loss, 2) if r.avg_loss else "–"),
         ]))
 
     risk_table = dbc.Table(
@@ -1318,7 +1404,7 @@ def page_risk():
             marker_color=COLORS["accent"], opacity=0.7,
         ))
         fig_dist.add_vline(x=0, line_dash="dash", line_color=COLORS["muted"])
-    _fig_layout(fig_dist, "Trade P&L fordeling ($)", 320)
+    _fig_layout(fig_dist, f"Trade P&L fordeling ({get_currency_symbol()})", 320)
     fig_dist.update_xaxes(title=t('charts.profit_loss'))
     fig_dist.update_yaxes(title=t('charts.trade_count'))
 
@@ -1333,10 +1419,10 @@ def page_risk():
                     x=[sym], y=[pnl_total],
                     name=sym,
                     marker_color=COLORS["green"] if pnl_total > 0 else COLORS["red"],
-                    text=[f"${pnl_total:+,.0f}"],
+                    text=[format_value(pnl_total)],
                     textposition="outside",
                 ))
-    _fig_layout(fig_exposure, "P&L per aktie ($)", 320)
+    _fig_layout(fig_exposure, f"P&L per aktie ({get_currency_symbol()})", 320)
     fig_exposure.update_layout(showlegend=False)
 
     # Rolling Sharpe
@@ -1942,8 +2028,13 @@ def page_market_overview():
 
     if result is None:
         # Data is still being fetched in background — show spinner.
-        # Embed a hidden Interval that bumps auto-refresh quickly
-        # so the routing callback re-renders this page every 5s.
+        # Try to trigger background fetch if not started
+        try:
+            if not _scanner_state.get("loading"):
+                import threading as _th
+                _th.Thread(target=_fetch_scanner_data_sync, daemon=True).start()
+        except Exception:
+            pass
         return dbc.Container([
             html.H3([
                 html.I(className="bi bi-globe2 me-2"),
@@ -1955,8 +2046,15 @@ def page_market_overview():
                     t('common.loading'),
                     className="text-muted mt-4",
                 ),
+                html.P("Scanner data indlæses i baggrunden — siden opdateres automatisk...",
+                       style={"color": COLORS["muted"], "fontSize": "0.85rem"}),
             ], className="text-center", style={"padding": "100px 0"}),
-            # Force page reload after 5s to check if data is ready
+            # Hidden elements needed by callbacks (prevents missing ID errors)
+            html.Div(id="alloc-apply-result", style={"display": "none"}),
+            html.Div(id="alloc-total-warn", style={"display": "none"}),
+            html.Div(id="exlim-save-result", style={"display": "none"}),
+            html.Div(id="exlim-total-warn", style={"display": "none"}),
+            dcc.Graph(id="alloc-donut", style={"display": "none"}),
             dcc.Location(id="scanner-reload", refresh=True),
             dcc.Interval(id="scanner-poll", interval=5_000, max_intervals=1),
         ], fluid=True, className="p-4")
@@ -3272,11 +3370,20 @@ def _get_regime_data() -> dict:
     )
     from src.strategy.base_strategy import StrategyResult, Signal
 
+    spy_df = None
     try:
         fetcher = MarketDataFetcher()
-        spy_df = fetcher.get_historical_data("SPY", period="2y")
+        spy_df = fetcher.get_historical("SPY", lookback_days=500)
     except Exception:
-        spy_df = None
+        pass
+    # Fallback: try yfinance directly
+    if spy_df is None or spy_df.empty:
+        try:
+            import yfinance as _yf
+            _tk = _yf.Ticker("SPY")
+            spy_df = _tk.history(period="2y")
+        except Exception:
+            spy_df = None
 
     detector = RegimeDetector()
     adaptive = AdaptiveStrategy(detector=detector)
@@ -3654,9 +3761,9 @@ def page_stress_test():
                      style={"color": COLORS["red"], "fontWeight": "bold"}),
             html.Td(f"{r.worst_day_pct:+.1f}%", style={"color": COLORS["red"]}),
             html.Td(f"{r.recovery_days}d", style={"color": COLORS["muted"]}),
-            html.Td(f"${r.with_risk_mgmt_end:,.0f}",
+            html.Td(format_value(r.with_risk_mgmt_end),
                      style={"color": COLORS["accent"]}),
-            html.Td(f"${r.without_risk_mgmt_end:,.0f}",
+            html.Td(format_value(r.without_risk_mgmt_end),
                      style={"color": COLORS["muted"]}),
             html.Td(f"+{r.risk_mgmt_saved_pct:.1f}%",
                      style={"color": saved_color, "fontWeight": "bold"}),
@@ -3721,7 +3828,7 @@ def page_stress_test():
     fig_comparison.add_hline(
         y=report.initial_value, line_dash="dot",
         line_color=COLORS["muted"],
-        annotation_text=f"Start: ${report.initial_value:,.0f}",
+        annotation_text=f"Start: {format_value(report.initial_value)}",
     )
     _fig_layout(fig_comparison, t('health.final_value_comparison'))
     fig_comparison.update_layout(
@@ -3758,16 +3865,16 @@ def page_stress_test():
         mc_section = [
             dbc.Row([dbc.Col(dcc.Graph(figure=fig_mc))], className="mb-4"),
             dbc.Row([
-                dbc.Col(_metric_card(t('charts.median'), f"${mc.median:,.0f}",
+                dbc.Col(_metric_card(t('charts.median'), format_value(mc.median),
                                      f"{(mc.median / mc.initial_value - 1) * 100:+.1f}%",
                                      COLORS["accent"]), md=2),
-                dbc.Col(_metric_card(t('charts.worst_1pct'), f"${mc.worst_case:,.0f}",
+                dbc.Col(_metric_card(t('charts.worst_1pct'), format_value(mc.worst_case),
                                      f"{(mc.worst_case / mc.initial_value - 1) * 100:+.1f}%",
                                      COLORS["red"]), md=2),
-                dbc.Col(_metric_card(t('charts.best_99pct'), f"${mc.best_case:,.0f}",
+                dbc.Col(_metric_card(t('charts.best_99pct'), format_value(mc.best_case),
                                      f"{(mc.best_case / mc.initial_value - 1) * 100:+.1f}%",
                                      COLORS["green"]), md=2),
-                dbc.Col(_metric_card("VaR (95%)", f"${mc.var_95:,.0f}", "",
+                dbc.Col(_metric_card("VaR (95%)", format_value(mc.var_95), "",
                                      COLORS["orange"]), md=2),
                 dbc.Col(_metric_card(t('charts.prob_loss'), f"{mc.prob_loss_pct:.1f}%", "",
                                      COLORS["red"]), md=2),
@@ -4038,7 +4145,7 @@ def page_health():
             html.Td(f"{s.sharpe_30d:+.2f}", style={
                 "color": COLORS["green"] if s.sharpe_30d > 0.5 else COLORS["red"]}),
             html.Td(f"{s.win_rate:.1f}%", style={"color": COLORS["text"]}),
-            html.Td(f"${s.total_pnl:+,.0f}", style={
+            html.Td(format_value(s.total_pnl), style={
                 "color": COLORS["green"] if s.total_pnl > 0 else COLORS["red"]}),
             html.Td(f"{s.profit_factor:.2f}", style={"color": COLORS["text"]}),
             html.Td(f"{s.total_trades}", style={"color": COLORS["muted"]}),
@@ -4075,9 +4182,16 @@ def page_health():
                 html.P(a.reason,
                        style={"color": COLORS["muted"], "fontSize": "0.85rem",
                               "margin": "4px 0"}),
-                html.P(f"→ {a.recommendation}",
-                       style={"color": COLORS["accent"], "fontSize": "0.85rem",
-                              "margin": 0}),
+                html.Div([
+                    html.Span(f"→ {a.recommendation}  ",
+                              style={"color": COLORS["accent"], "fontSize": "0.85rem"}),
+                    dcc.Link(
+                        t('health.go_to_strategies') if t('health.go_to_strategies') != 'health.go_to_strategies' else "Gå til Strategier →",
+                        href="/strategies",
+                        style={"color": COLORS["blue"], "fontSize": "0.85rem",
+                               "textDecoration": "underline"},
+                    ),
+                ], style={"margin": 0}),
             ], style={"backgroundColor": COLORS["card"],
                       "border": f"1px solid {COLORS['border']}"}))
 
@@ -4160,7 +4274,7 @@ def page_health():
                                  str(len(strategies)), "",
                                  COLORS["accent"]), md=2),
             dbc.Col(_metric_card("P&L i dag",
-                                 f"${daily.pnl_today:+,.0f}",
+                                 format_value(daily.pnl_today),
                                  f"{daily.return_today_pct:+.2f}%",
                                  COLORS["green"] if daily.pnl_today >= 0
                                  else COLORS["red"]), md=2),
@@ -4204,25 +4318,25 @@ def page_health():
                     html.Tbody([
                         html.Tr([
                             html.Td("P&L i dag", style={"color": COLORS["muted"]}),
-                            html.Td(f"${daily.pnl_today:+,.2f}",
+                            html.Td(format_value(daily.pnl_today, 2),
                                     style={"color": COLORS["green"] if daily.pnl_today >= 0
                                            else COLORS["red"], "textAlign": "right"}),
                         ]),
                         html.Tr([
                             html.Td("P&L denne uge", style={"color": COLORS["muted"]}),
-                            html.Td(f"${daily.pnl_week:+,.2f}",
+                            html.Td(format_value(daily.pnl_week, 2),
                                     style={"color": COLORS["green"] if daily.pnl_week >= 0
                                            else COLORS["red"], "textAlign": "right"}),
                         ]),
                         html.Tr([
                             html.Td(t('health.pnl_month'), style={"color": COLORS["muted"]}),
-                            html.Td(f"${daily.pnl_month:+,.2f}",
+                            html.Td(format_value(daily.pnl_month, 2),
                                     style={"color": COLORS["green"] if daily.pnl_month >= 0
                                            else COLORS["red"], "textAlign": "right"}),
                         ]),
                         html.Tr([
                             html.Td("P&L YTD", style={"color": COLORS["muted"]}),
-                            html.Td(f"${daily.pnl_ytd:+,.2f}",
+                            html.Td(format_value(daily.pnl_ytd, 2),
                                     style={"color": COLORS["green"] if daily.pnl_ytd >= 0
                                            else COLORS["red"], "textAlign": "right",
                                            "fontWeight": "bold"}),
@@ -6170,8 +6284,11 @@ def page_settings():
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col([
-                        html.H6(t("settings.max_positions_label", lang),
-                                style={"color": COLORS["text"]}, className="mb-1"),
+                        html.Div([
+                            html.H6(t("settings.max_positions_label", lang),
+                                    style={"color": COLORS["text"], "display": "inline"}, className="mb-1 me-2"),
+                            html.Span(id="settings-max-positions-indicator"),
+                        ]),
                         html.P(t("settings.max_positions_desc", lang),
                                style={"color": COLORS["muted"], "fontSize": "0.85rem"},
                                className="mb-0"),
@@ -6212,8 +6329,11 @@ def page_settings():
                 # Global Stop-Loss
                 dbc.Row([
                     dbc.Col([
-                        html.H6(t("settings.global_stoploss_label", lang),
-                                style={"color": COLORS["text"]}, className="mb-1"),
+                        html.Div([
+                            html.H6(t("settings.global_stoploss_label", lang),
+                                    style={"color": COLORS["text"], "display": "inline"}, className="mb-1 me-2"),
+                            html.Span(id="settings-global-stoploss-indicator"),
+                        ]),
                         html.P(t("settings.global_stoploss_desc", lang),
                                style={"color": COLORS["muted"], "fontSize": "0.85rem"},
                                className="mb-0"),
@@ -6254,8 +6374,11 @@ def page_settings():
                 # Position Size %
                 dbc.Row([
                     dbc.Col([
-                        html.H6(t("settings.position_pct_label", lang),
-                                style={"color": COLORS["text"]}, className="mb-1"),
+                        html.Div([
+                            html.H6(t("settings.position_pct_label", lang),
+                                    style={"color": COLORS["text"], "display": "inline"}, className="mb-1 me-2"),
+                            html.Span(id="settings-position-pct-indicator"),
+                        ]),
                         html.P(t("settings.position_pct_desc", lang),
                                style={"color": COLORS["muted"], "fontSize": "0.85rem"},
                                className="mb-0"),
@@ -6296,8 +6419,11 @@ def page_settings():
                 # Max DKK per Symbol
                 dbc.Row([
                     dbc.Col([
-                        html.H6(t("settings.max_dkk_per_symbol_label", lang),
-                                style={"color": COLORS["text"]}, className="mb-1"),
+                        html.Div([
+                            html.H6(t("settings.max_dkk_per_symbol_label", lang),
+                                    style={"color": COLORS["text"], "display": "inline"}, className="mb-1 me-2"),
+                            html.Span(id="settings-max-dkk-per-symbol-indicator"),
+                        ]),
                         html.P(t("settings.max_dkk_per_symbol_desc", lang),
                                style={"color": COLORS["muted"], "fontSize": "0.85rem"},
                                className="mb-0"),
@@ -6338,8 +6464,11 @@ def page_settings():
                 # Max Exposure %
                 dbc.Row([
                     dbc.Col([
-                        html.H6(t("settings.max_exposure_label", lang),
-                                style={"color": COLORS["text"]}, className="mb-1"),
+                        html.Div([
+                            html.H6(t("settings.max_exposure_label", lang),
+                                    style={"color": COLORS["text"], "display": "inline"}, className="mb-1 me-2"),
+                            html.Span(id="settings-max-exposure-indicator"),
+                        ]),
                         html.P(t("settings.max_exposure_desc", lang),
                                style={"color": COLORS["muted"], "fontSize": "0.85rem"},
                                className="mb-0"),
@@ -7830,10 +7959,18 @@ def save_ibkr_settings(enabled, n_clicks, host, port, client_id):
         ), "Disabled"
 
 
+def _risk_indicator(active: bool) -> dbc.Badge:
+    """Return a green 'Aktiv' or gray 'Inaktiv' badge for risk limit status."""
+    if active:
+        return dbc.Badge("Aktiv", color="success", className="ms-2", style={"fontSize": "0.7rem"})
+    return dbc.Badge("Inaktiv", color="secondary", className="ms-2", style={"fontSize": "0.7rem"})
+
+
 # ── Max Positions callback ────────────────────────────────
 
 @callback(
     Output("settings-max-positions-status", "children"),
+    Output("settings-max-positions-indicator", "children"),
     Input("settings-max-positions-save-btn", "n_clicks"),
     State("settings-max-positions-input", "value"),
     prevent_initial_call=True,
@@ -7844,7 +7981,7 @@ def save_max_positions(n_clicks, max_pos):
         return html.Span(
             t("settings.max_positions_invalid", lang),
             style={"color": COLORS["orange"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(False)
     try:
         import json
         max_pos = int(max_pos)
@@ -7854,6 +7991,7 @@ def save_max_positions(n_clicks, max_pos):
         mp_path.write_text(json.dumps({"max_open_positions": max_pos}, indent=2))
 
         # Apply to running AutoTrader/RiskManager
+        applied = False
         try:
             from src.broker.registry import get_auto_trader
             trader = get_auto_trader()
@@ -7861,24 +7999,26 @@ def save_max_positions(n_clicks, max_pos):
                 rm = getattr(trader, "_risk_manager", None)
                 if rm:
                     rm.max_open_positions = max_pos
+                    applied = True
         except Exception:
             pass
 
         return html.Span(
             f"{t('settings.saved', lang)} — max {max_pos} positions",
             style={"color": COLORS["green"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(applied)
     except Exception as e:
         return html.Span(
             f"Error: {e}",
             style={"color": COLORS["red"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(False)
 
 
 # ── Position Size % callback ──────────────────────────────
 
 @callback(
     Output("settings-position-pct-status", "children"),
+    Output("settings-position-pct-indicator", "children"),
     Input("settings-position-pct-save-btn", "n_clicks"),
     State("settings-position-pct-input", "value"),
     prevent_initial_call=True,
@@ -7887,7 +8027,7 @@ def save_position_pct(n_clicks, pct):
     lang = get_language()
     if pct is None or pct < 1:
         return html.Span("Enter a valid percentage (1-50%).",
-                         style={"color": COLORS["orange"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["orange"], "fontSize": "0.85rem"}), _risk_indicator(False)
     try:
         import json
         pct = float(pct)
@@ -7898,7 +8038,7 @@ def save_position_pct(n_clicks, pct):
         rs["max_position_pct"] = pct
         rs_path.write_text(json.dumps(rs, indent=2))
 
-        # Apply to running AutoTrader + RiskManager
+        applied = False
         try:
             from src.broker.registry import get_auto_trader
             trader = get_auto_trader()
@@ -7908,21 +8048,23 @@ def save_position_pct(n_clicks, pct):
                 rm = getattr(trader, "_risk_manager", None)
                 if rm:
                     rm.max_position_pct = pct / 100.0
+                applied = True
         except Exception:
             pass
 
         return html.Span(
             f"{t('settings.saved', lang)} — max {pct:.0f}% per position",
-            style={"color": COLORS["green"], "fontSize": "0.85rem"})
+            style={"color": COLORS["green"], "fontSize": "0.85rem"}), _risk_indicator(applied)
     except Exception as e:
         return html.Span(f"Error: {e}",
-                         style={"color": COLORS["red"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["red"], "fontSize": "0.85rem"}), _risk_indicator(False)
 
 
 # ── Max DKK per Symbol callback ──────────────────────────
 
 @callback(
     Output("settings-max-dkk-per-symbol-status", "children"),
+    Output("settings-max-dkk-per-symbol-indicator", "children"),
     Input("settings-max-dkk-per-symbol-save-btn", "n_clicks"),
     State("settings-max-dkk-per-symbol-input", "value"),
     prevent_initial_call=True,
@@ -7931,7 +8073,7 @@ def save_max_dkk_per_symbol(n_clicks, max_dkk):
     lang = get_language()
     if max_dkk is None or max_dkk < 100:
         return html.Span("Enter a valid amount (min 100 DKK).",
-                         style={"color": COLORS["orange"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["orange"], "fontSize": "0.85rem"}), _risk_indicator(False)
     try:
         import json
         max_dkk = float(max_dkk)
@@ -7942,27 +8084,29 @@ def save_max_dkk_per_symbol(n_clicks, max_dkk):
         rs["max_dkk_per_symbol"] = max_dkk
         rs_path.write_text(json.dumps(rs, indent=2))
 
-        # Apply to running AutoTrader
+        applied = False
         try:
             from src.broker.registry import get_auto_trader
             trader = get_auto_trader()
             if trader:
                 trader.max_dkk_per_symbol = max_dkk
+                applied = True
         except Exception:
             pass
 
         return html.Span(
             f"{t('settings.saved', lang)} — max {max_dkk:,.0f} DKK per symbol",
-            style={"color": COLORS["green"], "fontSize": "0.85rem"})
+            style={"color": COLORS["green"], "fontSize": "0.85rem"}), _risk_indicator(applied)
     except Exception as e:
         return html.Span(f"Error: {e}",
-                         style={"color": COLORS["red"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["red"], "fontSize": "0.85rem"}), _risk_indicator(False)
 
 
 # ── Max Exposure % callback ──────────────────────────────
 
 @callback(
     Output("settings-max-exposure-status", "children"),
+    Output("settings-max-exposure-indicator", "children"),
     Input("settings-max-exposure-save-btn", "n_clicks"),
     State("settings-max-exposure-input", "value"),
     prevent_initial_call=True,
@@ -7971,7 +8115,7 @@ def save_max_exposure(n_clicks, pct):
     lang = get_language()
     if pct is None or pct < 10:
         return html.Span("Enter a valid percentage (10-100%).",
-                         style={"color": COLORS["orange"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["orange"], "fontSize": "0.85rem"}), _risk_indicator(False)
     try:
         import json
         pct = float(pct)
@@ -7982,7 +8126,7 @@ def save_max_exposure(n_clicks, pct):
         rs["max_exposure_pct"] = pct
         rs_path.write_text(json.dumps(rs, indent=2))
 
-        # Apply to running DynamicRiskManager if available
+        applied = False
         try:
             from src.broker.registry import get_auto_trader
             trader = get_auto_trader()
@@ -7990,22 +8134,24 @@ def save_max_exposure(n_clicks, pct):
                 drm = getattr(trader, "_dynamic_risk", None)
                 if drm:
                     drm._current_params["max_exposure_pct"] = pct / 100.0
+                    applied = True
         except Exception:
             pass
 
         cash_reserve = 100 - pct
         return html.Span(
             f"{t('settings.saved', lang)} — max {pct:.0f}% exposure ({cash_reserve:.0f}% cash reserve)",
-            style={"color": COLORS["green"], "fontSize": "0.85rem"})
+            style={"color": COLORS["green"], "fontSize": "0.85rem"}), _risk_indicator(applied)
     except Exception as e:
         return html.Span(f"Error: {e}",
-                         style={"color": COLORS["red"], "fontSize": "0.85rem"})
+                         style={"color": COLORS["red"], "fontSize": "0.85rem"}), _risk_indicator(False)
 
 
 # ── Global Stop-Loss callback ─────────────────────────────
 
 @callback(
     Output("settings-global-stoploss-status", "children"),
+    Output("settings-global-stoploss-indicator", "children"),
     Input("settings-global-stoploss-save-btn", "n_clicks"),
     State("settings-global-stoploss-input", "value"),
     prevent_initial_call=True,
@@ -8016,16 +8162,15 @@ def save_global_stoploss(n_clicks, sl_pct):
         return html.Span(
             t("settings.stoploss_enter_value", lang),
             style={"color": COLORS["orange"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(False)
     try:
         import json
         sl_pct = float(sl_pct)
 
-        # Persist to file
         gsl_path = _EXCHANGE_SL_PATH.parent / "global_stop_loss.json"
         gsl_path.write_text(json.dumps({"stop_loss_pct": sl_pct}, indent=2))
 
-        # Apply to running RiskManager
+        applied = False
         try:
             from src.broker.registry import get_auto_trader
             trader = get_auto_trader()
@@ -8033,18 +8178,19 @@ def save_global_stoploss(n_clicks, sl_pct):
                 rm = getattr(trader, "_risk_manager", None)
                 if rm:
                     rm.stop_loss_pct = sl_pct / 100.0
+                    applied = True
         except Exception:
             pass
 
         return html.Span(
             f"{t('settings.saved', lang)} — global stop-loss: {sl_pct:.1f}%",
             style={"color": COLORS["green"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(applied)
     except Exception as e:
         return html.Span(
             f"Error: {e}",
             style={"color": COLORS["red"], "fontSize": "0.85rem"},
-        )
+        ), _risk_indicator(False)
 
 
 # ── Per-Exchange Stop-Loss callback ───────────────────────
@@ -8215,20 +8361,24 @@ def refresh_fx_rates(_n):
     [
         Output("insider-sentiment-content", "children"),
         Output("short-interest-content", "children"),
+        Output("insider-trades-table", "children"),
+        Output("institutional-holdings-content", "children"),
+        Output("smart-money-assessment", "children"),
     ],
     Input("smart-money-btn", "n_clicks"),
+    Input("smart-money-symbol", "value"),
     State("smart-money-symbol", "value"),
     prevent_initial_call=True,
 )
-def analyze_smart_money(_clicks, symbol):
+def analyze_smart_money(_clicks, _symbol_change, symbol):
     if not symbol:
-        return dash.no_update, dash.no_update
+        return (dash.no_update,) * 5
     try:
         from src.data.insider_tracking import InsiderTracker
         tracker = InsiderTracker()
         report = tracker.get_smart_money_report(symbol)
 
-        # Insider sentiment
+        # ── 1. Insider sentiment ──
         sentiment = report.insider_sentiment
         if sentiment and sentiment.trades:
             _buy_label = t('common.buy')
@@ -8241,7 +8391,7 @@ def analyze_smart_money(_clicks, symbol):
                     html.Strong(tr.insider_name, style={"color": COLORS["text"]}),
                     html.Span(f"  {tr.insider_title}", style={"color": COLORS["muted"], "fontSize": "0.8rem"}),
                     html.Span(
-                        f"  {_buy_label if tr.is_purchase else _sell_label} {tr.shares:,.0f} @ ${tr.price_per_share:,.2f}",
+                        f"  {_buy_label if tr.is_purchase else _sell_label} {tr.shares:,.0f} @ {format_value(tr.price_per_share, 2)}",
                         style={"color": color, "fontWeight": "bold"},
                     ),
                 ], style={"padding": "4px 0", "borderBottom": f"1px solid {COLORS['border']}"}))
@@ -8259,7 +8409,7 @@ def analyze_smart_money(_clicks, symbol):
         else:
             insider_content = html.P(f"{t('smart_money.no_insider_trades')} {symbol}", className="text-muted")
 
-        # Short interest
+        # ── 2. Short interest ──
         short_data = report.short_interest
         if short_data:
             si_color = COLORS["red"] if short_data.is_heavily_shorted else COLORS["green"]
@@ -8286,11 +8436,98 @@ def analyze_smart_money(_clicks, symbol):
         else:
             short_content = html.P(f"{t('smart_money.no_short_data')} {symbol}", className="text-muted")
 
-        return insider_content, short_content
+        # ── 3. Insider trades table ──
+        trades_table_content = html.P(f"Ingen insider-handler fundet for {symbol}", className="text-muted")
+        if sentiment and sentiment.trades:
+            rows = []
+            for tr in sentiment.trades[:20]:
+                side_color = COLORS["green"] if tr.is_purchase else COLORS["red"]
+                rows.append(html.Tr([
+                    html.Td(tr.filed_date, style={"color": COLORS["muted"], "fontSize": "0.85rem"}),
+                    html.Td(tr.insider_name, style={"color": COLORS["text"]}),
+                    html.Td(tr.insider_title or "", style={"color": COLORS["muted"], "fontSize": "0.85rem"}),
+                    html.Td("KØB" if tr.is_purchase else "SÆLG", style={"color": side_color, "fontWeight": "bold"}),
+                    html.Td(f"{tr.shares:,.0f}", style={"color": COLORS["text"]}),
+                    html.Td(format_value(tr.price_per_share, 2), style={"color": COLORS["text"]}),
+                    html.Td(format_value(tr.shares * tr.price_per_share), style={"color": COLORS["accent"]}),
+                ]))
+            trades_table_content = dbc.Table([
+                html.Thead(html.Tr([
+                    html.Th(h, style={"color": COLORS["accent"]})
+                    for h in ["Dato", "Insider", "Titel", "Side", "Antal", "Pris", "Værdi"]
+                ])),
+                html.Tbody(rows),
+            ], bordered=True, hover=True, responsive=True,
+               style={"backgroundColor": COLORS["card"]}, className="text-light")
+
+        # ── 4. Institutional holdings ──
+        inst_content = html.P("Ingen institutionelle data tilgængelige", className="text-muted")
+        institutional = getattr(report, "institutional_holdings", None)
+        if institutional and hasattr(institutional, "holders") and institutional.holders:
+            inst_rows = []
+            for h in institutional.holders[:15]:
+                change_color = COLORS["green"] if getattr(h, "change_pct", 0) > 0 else COLORS["red"]
+                inst_rows.append(html.Tr([
+                    html.Td(getattr(h, "name", ""), style={"color": COLORS["text"]}),
+                    html.Td(f"{getattr(h, 'shares', 0):,.0f}", style={"color": COLORS["text"]}),
+                    html.Td(format_value(getattr(h, "value", 0)), style={"color": COLORS["accent"]}),
+                    html.Td(f"{getattr(h, 'pct_held', 0):.2f}%", style={"color": COLORS["text"]}),
+                    html.Td(f"{getattr(h, 'change_pct', 0):+.1f}%", style={"color": change_color}),
+                ]))
+            inst_content = dbc.Table([
+                html.Thead(html.Tr([
+                    html.Th(h, style={"color": COLORS["accent"]})
+                    for h in ["Fond/Institution", "Aktier", "Værdi", "% Holdt", "Ændring"]
+                ])),
+                html.Tbody(inst_rows),
+            ], bordered=True, hover=True, responsive=True,
+               style={"backgroundColor": COLORS["card"]}, className="text-light")
+        elif institutional and hasattr(institutional, "total_institutional_pct"):
+            inst_content = html.Div([
+                html.Div([
+                    html.Span("Institutionel ejerskab: ", style={"color": COLORS["muted"]}),
+                    html.Span(f"{institutional.total_institutional_pct:.1f}%",
+                              style={"color": COLORS["accent"], "fontWeight": "bold", "fontSize": "1.1rem"}),
+                ]),
+            ])
+
+        # ── 5. Overall assessment ──
+        assessment = getattr(report, "assessment", None) or getattr(report, "overall_signal", None)
+        if assessment and isinstance(assessment, str):
+            assess_content = html.P(assessment, style={"color": COLORS["text"], "whiteSpace": "pre-line"})
+        elif assessment:
+            signal = getattr(assessment, "signal", "NEUTRAL")
+            reason = getattr(assessment, "reason", "")
+            sig_color = COLORS["green"] if "BUY" in str(signal).upper() else (
+                COLORS["red"] if "SELL" in str(signal).upper() else COLORS["orange"]
+            )
+            assess_content = html.Div([
+                html.Div([
+                    html.Span("Signal: ", style={"color": COLORS["muted"]}),
+                    html.Span(str(signal), style={"color": sig_color, "fontWeight": "bold", "fontSize": "1.2rem"}),
+                ], className="mb-2"),
+                html.P(reason, style={"color": COLORS["text"]}),
+            ])
+        else:
+            # Build a summary from what we have
+            parts = []
+            if sentiment:
+                parts.append(f"Insider sentiment: {sentiment.score}/100 ({sentiment.sentiment.value})")
+            if short_data:
+                parts.append(f"Short interest: {short_data.short_pct_float:.1f}%")
+                if short_data.is_heavily_shorted:
+                    parts.append("Heavily shorted — potentiel short squeeze")
+            assess_content = html.Div([
+                html.P(f"Analyse for {symbol}:", style={"color": COLORS["accent"], "fontWeight": "bold"}),
+                html.Ul([html.Li(p, style={"color": COLORS["text"]}) for p in parts])
+                if parts else html.P("Ikke nok data til samlet vurdering", className="text-muted"),
+            ])
+
+        return insider_content, short_content, trades_table_content, inst_content, assess_content
     except Exception as e:
         logger.debug(f"Smart money analyse fejl: {e}")
         err = html.P(f"Kunne ikke hente data for {symbol}: {e}", className="text-danger small")
-        return err, err
+        return err, err, err, err, err
 
 
 # ── Options Flow button callback ──────────────────────────
@@ -8301,14 +8538,16 @@ def analyze_smart_money(_clicks, symbol):
         Output("options-iv-content", "children"),
         Output("options-pcr-content", "children"),
         Output("options-maxpain-content", "children"),
+        Output("options-assessment", "children"),
     ],
     Input("options-flow-btn", "n_clicks"),
+    Input("options-flow-symbol", "value"),
     State("options-flow-symbol", "value"),
     prevent_initial_call=True,
 )
-def analyze_options_flow(_clicks, symbol):
+def analyze_options_flow(_clicks, _sym_change, symbol):
     if not symbol:
-        return (dash.no_update,) * 4
+        return (dash.no_update,) * 5
     try:
         from src.data.options_flow import OptionsFlowTracker
         tracker = OptionsFlowTracker()
@@ -8391,11 +8630,33 @@ def analyze_options_flow(_clicks, symbol):
         else:
             mp_content = html.P(t('options.maxpain_unavailable'), className="text-muted")
 
-        return uoa_content, iv_content, pcr_content, mp_content
+        # Overall assessment
+        parts = []
+        if summary.unusual_options:
+            call_count = sum(1 for o in summary.unusual_options if o.option_type == "CALL")
+            put_count = len(summary.unusual_options) - call_count
+            bias = "Bullish" if call_count > put_count else "Bearish" if put_count > call_count else "Neutral"
+            parts.append(f"Unusual activity: {len(summary.unusual_options)} trades ({call_count} calls, {put_count} puts) → {bias}")
+        if iv:
+            parts.append(f"IV Rank: {iv.iv_rank:.0f}% — {'High (premium selling)' if iv.iv_rank > 70 else 'Low (cheap options)' if iv.iv_rank < 30 else 'Normal'}")
+        if pcr:
+            parts.append(f"Put/Call Ratio: {pcr.ratio:.2f} — {pcr.interpretation}")
+        if mp:
+            parts.append(f"Max Pain: {format_value(mp.max_pain_price, 2)} (current: {format_value(mp.current_price, 2)}, {mp.direction})")
+
+        if parts:
+            assess_content = html.Div([
+                html.P(f"Options analyse for {symbol}:", style={"color": COLORS["accent"], "fontWeight": "bold"}),
+                html.Ul([html.Li(p, style={"color": COLORS["text"]}) for p in parts]),
+            ])
+        else:
+            assess_content = html.P("Ikke nok data til samlet vurdering", className="text-muted")
+
+        return uoa_content, iv_content, pcr_content, mp_content, assess_content
     except Exception as e:
         logger.debug(f"Options flow analyse fejl: {e}")
         err = html.P(f"Kunne ikke hente options data for {symbol}: {e}", className="text-danger small")
-        return err, err, err, err
+        return err, err, err, err, err
 
 
 # ── Alt Data button callback ──────────────────────────────
@@ -8409,10 +8670,11 @@ def analyze_options_flow(_clicks, symbol):
         Output("alt-score-content", "children"),
     ],
     Input("alt-data-btn", "n_clicks"),
+    Input("alt-data-symbol", "value"),
     State("alt-data-symbol", "value"),
     prevent_initial_call=True,
 )
-def analyze_alt_data(_clicks, symbol):
+def analyze_alt_data(_clicks, _sym_change, symbol):
     if not symbol:
         return (dash.no_update,) * 5
     try:
