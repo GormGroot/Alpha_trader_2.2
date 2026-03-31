@@ -103,7 +103,8 @@ trading:
     - ZN=F       # 10-Year Treasury Note Futures
     - ZB=F       # 30-Year Treasury Bond Futures
     - ZT=F       # 2-Year Treasury Futures
-    - ^VIX       # VIX Volatility Index
+    # ^VIX er et indeks, ikke handelbart — brug kun som regime-indikator
+    # - ^VIX
 
     # ── Nordic Stocks ─────────────────────────────────────────
     - NOVO-B.CO  # Novo Nordisk (DK)
@@ -152,7 +153,7 @@ trading:
     - BAS.DE     # BASF
     - DBK.DE     # Deutsche Bank
     - ADS.DE     # Adidas
-    - AIR.DE     # Airbus
+    # AIR.DE fjernet — duplikat af AIR.PA (Airbus' primære listing)
     - HEN3.DE    # Henkel
     - RWE.DE     # RWE
     # France (Euronext Paris)
@@ -367,12 +368,12 @@ strategy:
 
 # --- Risikostyring --------------------------------------------
 risk:
-  max_position_pct: 0.15        # Maks 15 % af portefølje pr. position (was 0.10)
+  max_position_pct: 0.10        # Maks 10 % af portefølje pr. position (8 x 10% = 80% max eksponering)
   max_daily_loss_pct: 0.05      # Stop al handel ved 5 % dagligt tab (was 0.15)
   max_open_positions: 8         # Fokuser kapital (was 30)
-  stop_loss_pct: 0.015          # Tighter SL for crypto scalping (was 0.05)
-  take_profit_pct: 0.025        # Take profits faster (was 0.10)
-  trailing_stop_pct: 0.012      # Lock gains faster (was 0.07)
+  stop_loss_pct: 0.03            # 3% SL — balanceret for aktier+crypto (was 0.015 crypto-only)
+  take_profit_pct: 0.05          # 5% TP — giver plads til aktiers daglige bevægelser (was 0.025)
+  trailing_stop_pct: 0.025       # 2.5% trailing — undgår unødvendige stop-outs (was 0.012)
   max_drawdown_pct: 0.10        # Stop ALT ved 10 % drawdown (was 0.25)
   max_correlation: 0.85         # Undgå for mange korrelerede positioner
 

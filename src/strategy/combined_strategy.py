@@ -33,6 +33,8 @@ class CombinedStrategy(BaseStrategy):
             raise ValueError("CombinedStrategy kræver mindst 2 sub-strategier")
 
         total_weight = sum(w for _, w in strategies)
+        if total_weight == 0:
+            raise ValueError("CombinedStrategy: sum af vægte er 0 — mindst én strategi skal have vægt > 0")
         self.strategies = [
             (s, w / total_weight) for s, w in strategies
         ]

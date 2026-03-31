@@ -210,7 +210,6 @@ class AlpacaBroker(BaseBroker):
         alpaca_order = self._api.get_order(order_id)
         return self._map_order(alpaca_order)
 
-    @_retry_on_transient()
     def cancel_order(self, order_id: str) -> bool:
         """Annullér en ordre via Alpaca API."""
         try:
@@ -218,6 +217,7 @@ class AlpacaBroker(BaseBroker):
             logger.info(f"[alpaca] Ordre {order_id} annulleret")
             return True
         except tradeapi.rest.APIError as exc:
+            # Ikke-transient fejl (f.eks. ordre allerede fyldt) — log og returner False
             logger.warning(f"[alpaca] Kunne ikke annullere {order_id}: {exc}")
             return False
 

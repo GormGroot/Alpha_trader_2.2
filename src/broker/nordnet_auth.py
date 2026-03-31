@@ -138,6 +138,7 @@ class NordnetSession:
 
         self._rate_limiter.wait()
         try:
+            # NB: form-data sendes over HTTPS. Sæt IKKE urllib3 debug-logging i produktion.
             response = self._session.post(
                 login_url,
                 data={

@@ -210,8 +210,13 @@ class TestEnsembleTraining:
 # ── Test Majority Voting ─────────────────────────────────────
 
 class TestMajorityVoting:
+    def _vote(self, *predictions):
+        """Helper: kald _majority_vote via en instans med min_agreement=2."""
+        model = EnsembleMLStrategy(min_agreement=2)
+        return model._majority_vote(*predictions)
+
     def test_all_agree_buy(self):
-        result = EnsembleMLStrategy._majority_vote(
+        result = self._vote(
             np.array([1, 1, 1]),
             np.array([1, 1, 1]),
             np.array([1, 1, 1]),
@@ -219,7 +224,7 @@ class TestMajorityVoting:
         assert (result == 1).all()
 
     def test_all_agree_sell(self):
-        result = EnsembleMLStrategy._majority_vote(
+        result = self._vote(
             np.array([0, 0, 0]),
             np.array([0, 0, 0]),
             np.array([0, 0, 0]),
@@ -227,7 +232,7 @@ class TestMajorityVoting:
         assert (result == 0).all()
 
     def test_two_of_three_buy(self):
-        result = EnsembleMLStrategy._majority_vote(
+        result = self._vote(
             np.array([1]),
             np.array([1]),
             np.array([0]),
@@ -235,7 +240,7 @@ class TestMajorityVoting:
         assert result[0] == 1
 
     def test_two_of_three_sell(self):
-        result = EnsembleMLStrategy._majority_vote(
+        result = self._vote(
             np.array([0]),
             np.array([0]),
             np.array([1]),
@@ -243,7 +248,7 @@ class TestMajorityVoting:
         assert result[0] == 0
 
     def test_mixed_votes(self):
-        result = EnsembleMLStrategy._majority_vote(
+        result = self._vote(
             np.array([1, 0, 1, 0]),
             np.array([1, 0, 0, 1]),
             np.array([0, 1, 1, 0]),

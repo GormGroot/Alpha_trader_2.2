@@ -118,17 +118,18 @@ class RiskSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_risk_ranges(self) -> "RiskSettings":
-        """Ensure stop_loss_pct is a decimal fraction in a sane range."""
+        """Ensure risk percentages are decimal fractions in sane ranges."""
+        if not (0.001 <= self.max_position_pct <= 0.25):
+            raise ValueError(
+                f"max_position_pct={self.max_position_pct} is out of range — "
+                f"must be between 0.001 (0.1%) and 0.25 (25%). "
+                f"Use decimal notation, e.g. 0.15 for 15%."
+            )
         if not (0.005 <= self.stop_loss_pct <= 0.10):
             raise ValueError(
                 f"stop_loss_pct={self.stop_loss_pct} is out of range — "
                 f"must be between 0.005 (0.5%) and 0.10 (10%). "
                 f"Use decimal notation, e.g. 0.015 for 1.5%."
-            )
-        if self.stop_loss_pct > 1.0 or self.max_position_pct > 1.0:
-            raise ValueError(
-                "Risk percentages must be in decimal notation (e.g. 0.02 not 2.0). "
-                f"Got stop_loss_pct={self.stop_loss_pct}, max_position_pct={self.max_position_pct}"
             )
         return self
 

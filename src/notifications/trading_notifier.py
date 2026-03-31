@@ -13,6 +13,7 @@ Bygger ovenpå den eksisterende Notifier med rige HTML-templates.
 
 from __future__ import annotations
 
+import html as _html
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -118,8 +119,8 @@ def _footer_html() -> str:
 def _metric_card(label: str, value: str, css_class: str = "") -> str:
     return f"""
     <div class="metric-card">
-      <div class="metric-label">{label}</div>
-      <div class="metric-value {css_class}">{value}</div>
+      <div class="metric-label">{_html.escape(label)}</div>
+      <div class="metric-value {css_class}">{_html.escape(value)}</div>
     </div>
     """
 

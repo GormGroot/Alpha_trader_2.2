@@ -179,6 +179,7 @@ class OrderManager:
         limit_price: float | None = None,
         broker_override: str | None = None,
         notes: str = "",
+        short: bool = False,
     ) -> UnifiedOrder:
         """
         Placér en ordre via BrokerRouter.
@@ -237,7 +238,7 @@ class OrderManager:
             if side_enum == OrderSide.BUY:
                 broker_order = broker.buy(symbol, qty, type_enum, limit_price)
             else:
-                broker_order = broker.sell(symbol, qty, type_enum, limit_price)
+                broker_order = broker.sell(symbol, qty, type_enum, limit_price, short=short)
 
             # Map broker order ID
             unified.broker_order_id = broker_order.order_id
@@ -385,23 +386,24 @@ class OrderManager:
         params: list[Any] = []
 
         if symbol:
-            assert "symbol" in _ALLOWED_FILTERS
+            if "symbol" not in _ALLOWED_FILTERS:
+                raise ValueError("Invalid filter column")
             query += " AND symbol = ?"
             params.append(symbol.upper())
         if broker:
-            assert "broker_name" in _ALLOWED_FILTERS
+            if "broker_name" not in _ALLOWED_FILTERS: raise ValueError("Invalid filter")
             query += " AND broker_name = ?"
             params.append(broker.lower())
         if status:
-            assert "status" in _ALLOWED_FILTERS
+            if "status" not in _ALLOWED_FILTERS: raise ValueError("Invalid filter")
             query += " AND status = ?"
             params.append(status.lower())
         if start_date:
-            assert "created_at" in _ALLOWED_FILTERS
+            if "created_at" not in _ALLOWED_FILTERS: raise ValueError("Invalid filter")
             query += " AND created_at >= ?"
             params.append(start_date)
         if end_date:
-            assert "created_at" in _ALLOWED_FILTERS
+            if "created_at" not in _ALLOWED_FILTERS: raise ValueError("Invalid filter")
             query += " AND created_at <= ?"
             params.append(end_date)
 
@@ -498,7 +500,7 @@ class OrderManager:
 
     def _persist_order(self, order: UnifiedOrder) -> None:
         """Gem/opdatér ordre i SQLite."""
-        with sqlite3.connect(self._db_path) as conn:
+        with sqlite3.connect(self._db_path, timeout=10) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO orders
                    (unified_id, broker_order_id, broker_name, symbol, side,

@@ -213,14 +213,15 @@ class TokenStore:
         """Encrypt data using Fernet (falls back to base64 if unavailable)."""
         if self._fernet is not None:
             return self._fernet.encrypt(data.encode()).decode()
-        # Fallback: base64 only (not secure, but preserves functionality)
+        # Fallback: base64 only — WARNING: tokens er IKKE krypteret!
+        logger.warning("[saxo-auth] Fernet ikke tilgængelig — tokens gemmes UKRYPTERET (base64). Installér cryptography-pakken.")
         return base64.b64encode(data.encode()).decode()
 
     def _decrypt(self, encoded: str) -> str:
         """Decrypt data using Fernet (falls back to base64 if unavailable)."""
         if self._fernet is not None:
             return self._fernet.decrypt(encoded.encode()).decode()
-        # Fallback: base64 only
+        # Fallback: base64 only — WARNING
         return base64.b64decode(encoded.encode()).decode()
 
 

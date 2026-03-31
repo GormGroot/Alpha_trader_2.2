@@ -321,7 +321,7 @@ class TestGoogleTrends:
             }
         }
 
-        with patch("src.data.alternative_data.TrendReq", return_value=mock_pytrends), \
+        with patch("src.data.alternative_data.TrendReq", return_value=mock_pytrends, create=True), \
              patch("src.data.alternative_data._HAS_PYTRENDS", True):
             result = tracker.get_google_trends("AAPL", use_cache=False)
 

@@ -95,39 +95,58 @@ class RiskManager:
     ) -> None:
         self.portfolio = portfolio
 
+        # Prioritet: 1) eksplicit parameter, 2) JSON config-override, 3) YAML default_config
         self.max_position_pct = max_position_pct if max_position_pct is not None else settings.risk.max_position_pct
-        # Load persisted position sizing override
-        try:
-            import json
-            from pathlib import Path as _Path
-            _rs = _Path(__file__).resolve().parent.parent.parent / "config" / "risk_sizing.json"
-            if _rs.exists():
-                _rsd = json.loads(_rs.read_text())
-                if "max_position_pct" in _rsd:
-                    self.max_position_pct = _rsd["max_position_pct"] / 100.0
-        except Exception:
-            pass
+        # Load persisted position sizing override (kun hvis IKKE sat eksplicit)
+        if max_position_pct is None:
+            try:
+                import json
+                from pathlib import Path as _Path
+                _rs = _Path(__file__).resolve().parent.parent.parent / "config" / "risk_sizing.json"
+                if _rs.exists():
+                    _rsd = json.loads(_rs.read_text())
+                    if "max_position_pct" in _rsd:
+                        _val = _rsd["max_position_pct"]
+                        # Værdi i JSON er allerede decimal (0.15 = 15%)
+                        if isinstance(_val, (int, float)) and 0.001 <= _val <= 0.25:
+                            self.max_position_pct = _val
+                        else:
+                            logger.warning(f"[risk] Ugyldig max_position_pct i risk_sizing.json: {_val} — ignoreret (tilladt: 0.001-0.25)")
+            except Exception as e:
+                logger.warning(f"[risk] Kunne ikke læse risk_sizing.json: {e}")
         self.max_daily_loss_pct = max_daily_loss_pct if max_daily_loss_pct is not None else settings.risk.max_daily_loss_pct
         self.max_open_positions = max_open_positions if max_open_positions is not None else settings.risk.max_open_positions
-        # Load persisted override if available
-        try:
-            import json
-            from pathlib import Path as _Path
-            _mp = _Path(__file__).resolve().parent.parent.parent / "config" / "max_positions.json"
-            if _mp.exists():
-                self.max_open_positions = json.loads(_mp.read_text()).get("max_open_positions", self.max_open_positions)
-        except Exception:
-            pass
+        # Load persisted override if available (kun hvis IKKE sat eksplicit)
+        if max_open_positions is None:
+            try:
+                import json
+                from pathlib import Path as _Path
+                _mp = _Path(__file__).resolve().parent.parent.parent / "config" / "max_positions.json"
+                if _mp.exists():
+                    _mp_val = json.loads(_mp.read_text()).get("max_open_positions", self.max_open_positions)
+                    if isinstance(_mp_val, int) and 1 <= _mp_val <= 50:
+                        self.max_open_positions = _mp_val
+                    else:
+                        logger.warning(f"[risk] Ugyldig max_open_positions: {_mp_val} — ignoreret (tilladt: 1-50)")
+            except Exception as e:
+                logger.warning(f"[risk] Kunne ikke læse max_positions.json: {e}")
         self.stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else settings.risk.stop_loss_pct
-        # Load persisted global stop-loss override
-        try:
-            import json
-            from pathlib import Path as _Path
-            _gsl = _Path(__file__).resolve().parent.parent.parent / "config" / "global_stop_loss.json"
-            if _gsl.exists():
-                self.stop_loss_pct = json.loads(_gsl.read_text()).get("stop_loss_pct", self.stop_loss_pct * 100) / 100.0
-        except Exception:
-            pass
+        # Load persisted global stop-loss override (kun hvis IKKE sat eksplicit)
+        if stop_loss_pct is None:
+            try:
+                import json
+                from pathlib import Path as _Path
+                _gsl = _Path(__file__).resolve().parent.parent.parent / "config" / "global_stop_loss.json"
+                if _gsl.exists():
+                    _gsl_raw = json.loads(_gsl.read_text()).get("stop_loss_pct", self.stop_loss_pct)
+                    # Auto-detect format: >1 = procent (f.eks. 5 = 5%), <=1 = decimal (f.eks. 0.05)
+                    _gsl_val = _gsl_raw / 100.0 if _gsl_raw > 1 else _gsl_raw
+                    if isinstance(_gsl_val, (int, float)) and 0.005 <= _gsl_val <= 0.20:
+                        self.stop_loss_pct = _gsl_val
+                    else:
+                        logger.warning(f"[risk] Ugyldig stop_loss_pct: {_gsl_val} — ignoreret (tilladt: 0.005-0.20)")
+            except Exception as e:
+                logger.warning(f"[risk] Kunne ikke læse global_stop_loss.json: {e}")
         self.take_profit_pct = take_profit_pct if take_profit_pct is not None else settings.risk.take_profit_pct
         self.trailing_stop_pct = trailing_stop_pct if trailing_stop_pct is not None else settings.risk.trailing_stop_pct
         self.max_drawdown_pct = max_drawdown_pct if max_drawdown_pct is not None else settings.risk.max_drawdown_pct
@@ -143,6 +162,7 @@ class RiskManager:
         side: str,
         requested_usd: float,
         price: float,
+        is_exit: bool = False,
     ) -> RiskDecision:
         """
         Tjek om en ordre overholder alle risikoregler.
@@ -152,19 +172,25 @@ class RiskManager:
             side: "long" eller "short".
             requested_usd: Ønsket handelsbeløb i USD.
             price: Aktuel pris per aktie.
+            is_exit: True hvis dette er en lukning af eksisterende position.
 
         Returns:
             RiskDecision med approved/rejected + eventuel justeret størrelse.
         """
-        # EXIT BYPASS: sælg eksisterende position uden risk checks
-        if side == "short" and symbol in self.portfolio.positions:
-            qty = self.portfolio.positions[symbol].qty
-            return RiskDecision(approved=True, reason=RejectionReason.APPROVED, message=f"Exit godkendt: sælg {qty} {symbol}", adjusted_qty=qty, adjusted_usd=qty * price)
+        # Auto-detect exit: kun hvis symbolet har en position OG side er modsat (sell af long, cover af short)
+        _is_exit = is_exit
+        if not _is_exit and symbol in self.portfolio.positions:
+            existing_side = self.portfolio.positions[symbol].side
+            _is_exit = (existing_side != side)  # long+short=exit, short+long=exit
 
         equity = self.portfolio.total_equity
 
         # 1. Trading halted?
         if self._trading_halted:
+            # EXIT BYPASS: tillad lukning af eksisterende positioner selvom handel er stoppet
+            if _is_exit and symbol in self.portfolio.positions:
+                qty = self.portfolio.positions[symbol].qty
+                return RiskDecision(approved=True, reason=RejectionReason.APPROVED, message=f"Exit godkendt (halted): sælg {qty} {symbol}", adjusted_qty=qty, adjusted_usd=qty * price)
             return self._reject(
                 RejectionReason.TRADING_HALTED,
                 f"Handel stoppet: {self._halt_reason}",
@@ -173,6 +199,10 @@ class RiskManager:
         # 2. Max drawdown
         dd = self.portfolio.current_drawdown_pct
         if dd >= self.max_drawdown_pct:
+            # EXIT BYPASS: tillad lukning selvom drawdown er nået
+            if _is_exit and symbol in self.portfolio.positions:
+                qty = self.portfolio.positions[symbol].qty
+                return RiskDecision(approved=True, reason=RejectionReason.APPROVED, message=f"Exit godkendt (drawdown): sælg {qty} {symbol}", adjusted_qty=qty, adjusted_usd=qty * price)
             self._halt_trading(f"Max drawdown nået: {dd:.1%} >= {self.max_drawdown_pct:.1%}")
             return self._reject(
                 RejectionReason.MAX_DRAWDOWN,
@@ -188,12 +218,15 @@ class RiskManager:
                 f"Dagligt tab overskredet: {daily_loss:.1%} >= {self.max_daily_loss_pct:.1%}",
             )
 
-        # 4. Duplicate position
+        # 4. Duplicate position — blokerer kun for SAMME retning (ny long når long eksisterer)
+        # Exits (sælg eksisterende) tillades altid
         if symbol in self.portfolio.positions:
-            return self._reject(
-                RejectionReason.DUPLICATE_POSITION,
-                f"Position i {symbol} eksisterer allerede",
-            )
+            existing_side = self.portfolio.positions[symbol].side
+            if existing_side == side:
+                return self._reject(
+                    RejectionReason.DUPLICATE_POSITION,
+                    f"Position i {symbol} ({existing_side}) eksisterer allerede",
+                )
 
         # 5. Max åbne positioner
         if self.portfolio.open_position_count >= self.max_open_positions:

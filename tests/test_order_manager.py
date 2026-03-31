@@ -26,34 +26,35 @@ class MockRouter:
 
     def __init__(self):
         self._orders = {}
+        self._brokers = {"alpaca": self, "nordnet": self}
 
-    def resolve_broker(self, symbol):
+    def resolve_broker(self, symbol, asset_type=None, broker_override=None):
         if symbol.endswith(".CO") or symbol.endswith(".ST"):
-            return "nordnet"
-        return "alpaca"
+            return "nordnet", self
+        return "alpaca", self
 
-    def buy(self, symbol, qty, order_type="market", limit_price=None):
+    def buy(self, symbol, qty, order_type="market", limit_price=None, broker_override=None):
         order = Order(
-            id=f"BROKER-{len(self._orders)+1:03d}",
+            order_id=f"BROKER-{len(self._orders)+1:03d}",
             symbol=symbol,
             side=OrderSide.BUY,
             qty=qty,
             order_type=OrderType.MARKET,
             status=OrderStatus.SUBMITTED,
         )
-        self._orders[order.id] = order
+        self._orders[order.order_id] = order
         return order
 
-    def sell(self, symbol, qty, order_type="market", limit_price=None):
+    def sell(self, symbol, qty, order_type="market", limit_price=None, broker_override=None, short=False):
         order = Order(
-            id=f"BROKER-{len(self._orders)+1:03d}",
+            order_id=f"BROKER-{len(self._orders)+1:03d}",
             symbol=symbol,
             side=OrderSide.SELL,
             qty=qty,
             order_type=OrderType.MARKET,
             status=OrderStatus.SUBMITTED,
         )
-        self._orders[order.id] = order
+        self._orders[order.order_id] = order
         return order
 
     def get_order_status(self, order_id):
@@ -61,6 +62,9 @@ class MockRouter:
         if order:
             order.status = OrderStatus.FILLED
         return order
+
+    def cancel_order(self, order_id):
+        return True
 
 
 class TestOrderManager:

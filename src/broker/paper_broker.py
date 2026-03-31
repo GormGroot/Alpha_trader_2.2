@@ -192,16 +192,20 @@ class PaperBroker(BaseBroker):
                 continue
 
             should_fill = False
-            if order.side == OrderSide.BUY and price <= order.limit_price:
+            if order.limit_price is None:
+                # Market-ordre i pending-listen — fyld altid
+                should_fill = True
+            elif order.side == OrderSide.BUY and price <= order.limit_price:
                 should_fill = True
             elif order.side == OrderSide.SELL and price >= order.limit_price:
                 should_fill = True
 
             if should_fill:
+                # Fyld til markedspris (ikke limit) — markedet kan have bevæget sig i vores favør
                 if order.side == OrderSide.BUY:
-                    self._fill_buy(order, order.limit_price)
+                    self._fill_buy(order, price)
                 else:
-                    self._fill_sell(order, order.limit_price)
+                    self._fill_sell(order, price)
                 filled.append(order)
             else:
                 still_pending.append(order_id)
@@ -303,27 +307,42 @@ class PaperBroker(BaseBroker):
 
     def _fill_short_open(self, order: Order, price: float) -> None:
         """Åbn en short position — sælg aktier vi ikke ejer."""
-        self._portfolio.open_position(
-            symbol=order.symbol,
-            side="short",
-            qty=order.qty,
-            price=price,
-            timestamp=order.submitted_at,
-        )
+        fee = self._fee_calc.calculate(order.symbol, "sell", order.qty, price)
+
+        try:
+            self._portfolio.open_position(
+                symbol=order.symbol,
+                side="short",
+                qty=order.qty,
+                price=price,
+                timestamp=order.submitted_at,
+            )
+        except ValueError as e:
+            # Margin-check fejlede — refunder IKKE fee (den blev aldrig trukket)
+            order.status = OrderStatus.REJECTED
+            order.error_message = str(e)
+            raise InsufficientFundsError(str(e))
+
+        # Fee trækkes først EFTER vellykket position-åbning
+        self._portfolio.cash -= fee.total
 
         order.status = OrderStatus.FILLED
         order.filled_qty = order.qty
         order.filled_avg_price = price
         order.filled_at = datetime.now().isoformat()
+        order.fees = fee.total
 
         proceeds = order.qty * price
         logger.info(
             f"[paper] SHORT {order.qty} {order.symbol} @ ${price:.2f} "
-            f"(proceeds=${proceeds:,.2f})"
+            f"(proceeds=${proceeds:,.2f} minus gebyr ${fee.total:.2f})"
         )
 
     def _fill_short_close(self, order: Order, price: float) -> None:
         """Luk en short position — køb aktier tilbage."""
+        fee = self._fee_calc.calculate(order.symbol, "buy", order.qty, price)
+        self._portfolio.cash -= fee.total
+
         self._portfolio.close_position(
             symbol=order.symbol,
             price=price,
@@ -335,6 +354,7 @@ class PaperBroker(BaseBroker):
         order.filled_qty = order.qty
         order.filled_avg_price = price
         order.filled_at = datetime.now().isoformat()
+        order.fees = fee.total
 
         cost = order.qty * price
         logger.info(

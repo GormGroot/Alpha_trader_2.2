@@ -35,7 +35,8 @@ from loguru import logger
 
 # ── Constants ───────────────────────────────────────────────
 
-CORPORATE_TAX_RATE = float(os.environ.get("COMPANY_TAX_RATE", "0.22"))
+_raw_tax_rate = float(os.environ.get("COMPANY_TAX_RATE", "0.22"))
+CORPORATE_TAX_RATE = min(1.0, max(0.0, _raw_tax_rate))  # Validér 0-100%
 TAX_YEAR_END = os.environ.get("TAX_YEAR_END", "12-31")
 DEFAULT_TAX_CREDIT = float(os.environ.get("TAX_CREDIT_INITIAL", "0"))
 
@@ -494,6 +495,7 @@ class CorporateTaxCalculator:
         fx_pnl: float = 0.0,
         deductible_costs: float = 0.0,
         positions: list[PositionTaxInfo] | None = None,
+        commit: bool = True,
         trades: list[RealizedTrade] | None = None,
         dividends: list[DividendEntry] | None = None,
     ) -> TaxResult:
@@ -521,20 +523,26 @@ class CorporateTaxCalculator:
         # Kildeskat-kredit reducerer brutto skat
         gross_tax = max(0, gross_tax - withholding_tax_credit)
 
-        # Skattetilgodehavende modregning
+        # Skattetilgodehavende modregning (brug lokal kopi for at undgå sideeffekter)
+        working_credit = self.tax_credit
         credit_used = 0.0
-        if gross_tax > 0 and self.tax_credit > 0:
-            credit_used = min(gross_tax, self.tax_credit)
-            self.tax_credit -= credit_used
+        if gross_tax > 0 and working_credit > 0:
+            credit_used = min(gross_tax, working_credit)
+            working_credit -= credit_used
 
         # Hvis underskud → tilføj til tilgodehavende
+        loss_credit = 0.0
         if taxable < 0:
             loss_credit = abs(taxable) * self.tax_rate
-            self.tax_credit += loss_credit
+            working_credit += loss_credit
             logger.info(
                 f"[tax] Underskud {taxable:,.0f} DKK → "
                 f"tilgodehavende +{loss_credit:,.0f} DKK"
             )
+
+        # Opdater self.tax_credit kun hvis commit=True (undgår sideeffekter ved simulering)
+        if commit:
+            self.tax_credit = working_credit
 
         net_tax = max(0, gross_tax - credit_used)
 
@@ -555,7 +563,7 @@ class CorporateTaxCalculator:
             gross_tax_dkk=round(gross_tax + credit_used, 2),
             tax_credit_used_dkk=round(credit_used, 2),
             net_tax_dkk=round(net_tax, 2),
-            remaining_tax_credit_dkk=round(self.tax_credit, 2),
+            remaining_tax_credit_dkk=round(working_credit, 2),
             positions=positions or [],
             trades=trades or [],
             dividends=dividends or [],
@@ -589,7 +597,8 @@ class CorporateTaxCalculator:
             fifo_price = current_price_dkk  # Ingen lots → ingen gevinst
 
         realized_gain = (current_price_dkk - fifo_price) * qty
-        tax_impact = realized_gain * self.tax_rate if realized_gain > 0 else 0.0
+        # Vis fuld skatteeffekt — negativ ved tab (tilgodehavende)
+        tax_impact = realized_gain * self.tax_rate
 
         # Credit impact
         credit_impact = 0.0

@@ -711,7 +711,7 @@ class RegimeDetector:
             recent_return = float(close.iloc[-1] / close.iloc[-min(20, len(close) - 1)] - 1)
             was_bearish = any(
                 r.regime in (MarketRegime.BEAR, MarketRegime.CRASH)
-                for r in self._history[-5:]
+                for r in list(self._history)[-5:]
             ) if self._history else False
             if recent_return > 0.10 and was_bearish:
                 return MarketRegime.RECOVERY

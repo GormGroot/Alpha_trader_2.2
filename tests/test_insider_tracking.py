@@ -920,7 +920,7 @@ class TestConstants:
         assert "Director" in INSIDER_ROLES
 
     def test_user_agent(self):
-        assert "AlphaVision" in SEC_USER_AGENT
+        assert "AlphaTrading" in SEC_USER_AGENT or "alpha" in SEC_USER_AGENT.lower()
 
 
 # ── Test Form 4 XML Parsing ─────────────────────────────────

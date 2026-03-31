@@ -50,7 +50,7 @@ def _now_cet() -> datetime:
         from src.ops.time_service import now_cet
         return now_cet()
     except Exception:
-        return _now_cet()
+        return datetime.now(TZ_CET)
 TZ_ET  = ZoneInfo("America/New_York")
 TZ_UTC = ZoneInfo("UTC")
 
@@ -871,7 +871,7 @@ class DailyScheduler:
 
     def get_results(self, limit: int = 50) -> list[TaskResult]:
         with self._lock:
-            return list(self._results[-limit:])
+            return list(self._results)[-limit:]
 
     def run_task_now(self, task_name: str) -> TaskResult | None:
         for task in self._tasks:

@@ -249,7 +249,7 @@ class TestMacroTrackerInit:
 
     def test_with_api_key(self):
         with patch("src.data.macro_indicators._HAS_FRED", True), \
-             patch("src.data.macro_indicators.Fred") as mock_fred:
+             patch("src.data.macro_indicators.Fred", create=True) as mock_fred:
             tracker = MacroIndicatorTracker(
                 fred_api_key="test_key_123",
                 cache_dir=_tmp_cache_dir(),

@@ -308,9 +308,10 @@ class ContinuousLearner:
             if correct:
                 perf.correct_signals += 1
 
-            # Opdater accuracy
+            # Opdater accuracy (NB: dette er all-time accuracy, ikke 7d)
+            # TODO: implementer tidsvindue-baseret accuracy
             if perf.total_signals > 0:
-                perf.accuracy_7d = perf.correct_signals / perf.total_signals
+                perf.accuracy_7d = perf.correct_signals / perf.total_signals  # all-time, misvisende navn
 
             perf.avg_pnl_per_signal = (
                 (perf.avg_pnl_per_signal * (perf.total_signals - 1) + outcome.pnl_pct)
@@ -448,8 +449,9 @@ class ContinuousLearner:
                 VALUES (?, ?, ?)
             """, ("EMERGENCY_RETRAIN", reason, "Alle modeller retrænes"))
 
-        # Nulstil drift window (keep deque with maxlen)
-        self.drift_window.clear()
+        # Behold historisk drift-data for post-retrain evaluering
+        # (nulstil IKKE — vi skal kunne se om retrain faktisk hjalp)
+        logger.info(f"[learner] Drift window beholdt ({len(self.drift_window)} entries) for post-retrain evaluering")
 
     # ─── Historical Crisis Analysis ─────────────────────────
 
@@ -709,9 +711,15 @@ class ContinuousLearner:
     def stop(self):
         """Stop learning loop"""
         self._running = False
-        if self._thread:
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
+            self._thread = None
         logger.info("🧠 Continuous Learning stoppet")
+
+    def __del__(self):
+        """Sikkerhedsnet — stop tråden ved garbage collection."""
+        if self._running:
+            self.stop()
 
     def _learning_loop(self, interval_minutes: int):
         """Hovedloop der kører i baggrunden"""

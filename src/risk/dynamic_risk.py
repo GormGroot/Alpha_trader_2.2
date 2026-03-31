@@ -535,9 +535,13 @@ class DynamicRiskManager:
         if not self._cb_state.is_active:
             return True
         if self._cb_state.can_auto_resume:
-            self._cb_state = CircuitBreakerState()
             return True
         return False
+
+    def reset_circuit_breaker(self) -> None:
+        """Eksplicit nulstilling af circuit breaker — kald kun bevidst."""
+        logger.info("[risk] Circuit breaker nulstillet manuelt")
+        self._cb_state = CircuitBreakerState()
 
     def _get_weekly_pnl_pct(self) -> float:
         """Beregn P&L for den aktuelle uge."""
@@ -571,7 +575,11 @@ class DynamicRiskManager:
         if equity <= 0:
             return {"current_exposure": 0, "max_allowed": 0, "overexposed": False, "action": ""}
 
-        invested = sum(p.market_value for p in self._portfolio.positions.values())
+        # Netto-eksponering: longs minus shorts (shorts reducerer eksponering)
+        invested = sum(
+            p.market_value if p.side == "long" else -p.market_value
+            for p in self._portfolio.positions.values()
+        )
         exposure_pct = invested / equity
         max_allowed = self.max_exposure_pct
         cash_pct = self._portfolio.cash / equity

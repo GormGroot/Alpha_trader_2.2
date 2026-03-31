@@ -132,7 +132,8 @@ class TestIndicatorStore:
         loaded = store.load("AAPL", "1d")
         assert loaded is not None
         assert len(loaded) == len(sample_ohlcv)
-        pd.testing.assert_frame_equal(loaded, sample_ohlcv)
+        # Parquet round-trip may change freq attribute, so compare values only
+        pd.testing.assert_frame_equal(loaded, sample_ohlcv, check_freq=False)
 
     def test_load_nonexistent_returns_none(self, store):
         assert store.load("NOPE", "1d") is None
@@ -221,8 +222,8 @@ class TestDataPipeline:
         )
         pipe.fetcher = mock_fetcher
 
-        # Gem noget i store først
-        pipe.store.save("AAPL", "1d", sample_ohlcv)
+        # Gem noget i store med SAMME interval som pipeline bruger
+        pipe.store.save("AAPL", pipe.interval, sample_ohlcv)
 
         # Lad API fejle
         mock_fetcher.get_historical.side_effect = Exception("Down")

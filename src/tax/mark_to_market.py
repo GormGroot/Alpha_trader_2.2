@@ -354,7 +354,7 @@ class MarkToMarketEngine:
             total_gains_dkk=round(total_gains, 2),
             total_losses_dkk=round(total_losses, 2),
             estimated_tax_dkk=round(
-                total_pnl * self.TAX_RATE if total_pnl > 0 else 0, 2
+                total_pnl * self.TAX_RATE, 2  # Kan være negativ (tilgodehavende ved tab)
             ),
             by_broker={k: round(v, 2) for k, v in by_broker.items()},
             by_currency={k: round(v, 2) for k, v in by_currency.items()},

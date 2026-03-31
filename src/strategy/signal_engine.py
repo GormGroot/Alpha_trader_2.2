@@ -173,9 +173,10 @@ class SignalStore:
         """Remove signal history older than keep_days to prevent unbounded growth."""
         try:
             with self._get_conn() as conn:
+                cutoff = (pd.Timestamp.now() - pd.Timedelta(days=keep_days)).isoformat()
                 conn.execute(
-                    "DELETE FROM signal_history WHERE timestamp < datetime('now', ?)",
-                    (f"-{keep_days} days",),
+                    "DELETE FROM signal_history WHERE timestamp < ?",
+                    (cutoff,),
                 )
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception:
@@ -285,8 +286,12 @@ class SignalEngine:
         # Gem alle signaler i databasen
         self.store.save_batch(signals)
 
-        # Prune old signal history every scan to prevent unbounded DB growth
-        self.store.prune(keep_days=7)
+        # Prune old signal history periodically (not every scan)
+        if not hasattr(self, "_scan_count"):
+            self._scan_count = 0
+        self._scan_count += 1
+        if self._scan_count % 50 == 0:
+            self.store.prune(keep_days=7)
 
         elapsed_ms = (pd.Timestamp.now() - start).total_seconds() * 1000
         result = EngineResult(timestamp=ts, signals=signals, run_duration_ms=elapsed_ms)

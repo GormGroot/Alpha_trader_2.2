@@ -388,6 +388,7 @@ def _download_daily_batch(
 
             # Compute indicators vectorised (single pass over full history)
             df_ind = data.rename(columns=str.lower)
+            ind_records = []  # Init for at undgå UnboundLocalError ved del
             if len(df_ind) >= 20:
                 ind_records = _compute_indicators_vectorised(symbol, df_ind)
 

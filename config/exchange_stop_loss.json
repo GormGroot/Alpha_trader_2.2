@@ -1,6 +1,25 @@
 {
   "us_stocks": 4.0,
   "denmark": 3.0,
+  "eu_nordic": 3.0,
+  "london": 3.5,
+  "canada": 3.5,
+  "japan": 4.0,
+  "hong_kong": 4.5,
+  "australia": 3.5,
+  "new_zealand": 3.5,
+  "india": 5.0,
   "crypto": 3.5,
-  "chicago": 1.5
+  "chicago": 1.5,
+  "singapore": 4.0,
+  "etfs": 3.0,
+  "korea": 4.5,
+  "taiwan": 4.5,
+  "shanghai": 5.0,
+  "shenzhen": 5.0,
+  "brazil": 5.0,
+  "mexico": 5.0,
+  "south_africa": 5.0,
+  "saudi": 5.0,
+  "indonesia": 5.0
 }

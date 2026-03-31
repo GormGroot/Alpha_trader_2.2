@@ -34,47 +34,47 @@ class TestFIFOTracker:
         tracker = FIFOTracker(db_path=os.path.join(_test_db_dir, "fifo1.db"))
 
         # Buy 100 shares at 50 DKK
-        tracker.add_lot("NOVO-B.CO", 100, 50.0, date(2026, 1, 15))
+        tracker.add_lot("NOVO-B.CO", 100, 50.0, "2026-01-15")
 
         # Buy 50 more at 60 DKK
-        tracker.add_lot("NOVO-B.CO", 50, 60.0, date(2026, 2, 1))
+        tracker.add_lot("NOVO-B.CO", 50, 60.0, "2026-02-01")
 
         # Sell 120 shares — should consume first lot (100@50) + 20 from second (20@60)
-        consumed = tracker.consume_lots("NOVO-B.CO", 120)
+        consumed = tracker.consume_lots("NOVO-B.CO", 120, 65.0, "2026-03-01")
         assert len(consumed) == 2
-        assert consumed[0][0] == 100  # qty from first lot
-        assert consumed[0][1] == 50.0  # price from first lot
-        assert consumed[1][0] == 20   # qty from second lot
-        assert consumed[1][1] == 60.0  # price from second lot
+        assert consumed[0].qty == 100  # qty from first lot
+        assert consumed[0].acquisition_price_dkk == 50.0  # price from first lot
+        assert consumed[1].qty == 20   # qty from second lot
+        assert consumed[1].acquisition_price_dkk == 60.0  # price from second lot
 
     def test_fifo_order(self):
         """FIFO: ældste lots forbruges først."""
         from src.tax.corporate_tax import FIFOTracker
         tracker = FIFOTracker(db_path=os.path.join(_test_db_dir, "fifo2.db"))
 
-        tracker.add_lot("AAPL", 10, 100.0, date(2026, 1, 1))
-        tracker.add_lot("AAPL", 10, 200.0, date(2026, 2, 1))
-        tracker.add_lot("AAPL", 10, 300.0, date(2026, 3, 1))
+        tracker.add_lot("AAPL", 10, 100.0, "2026-01-01")
+        tracker.add_lot("AAPL", 10, 200.0, "2026-02-01")
+        tracker.add_lot("AAPL", 10, 300.0, "2026-03-01")
 
-        consumed = tracker.consume_lots("AAPL", 15)
+        consumed = tracker.consume_lots("AAPL", 15, 250.0, "2026-03-15")
         # Should take 10@100 + 5@200
-        assert consumed[0][0] == 10
-        assert consumed[0][1] == 100.0
-        assert consumed[1][0] == 5
-        assert consumed[1][1] == 200.0
+        assert consumed[0].qty == 10
+        assert consumed[0].acquisition_price_dkk == 100.0
+        assert consumed[1].qty == 5
+        assert consumed[1].acquisition_price_dkk == 200.0
 
     def test_insufficient_lots(self):
         """Forbrug af mere end tilgængeligt bør fejle eller returnere hvad der er."""
         from src.tax.corporate_tax import FIFOTracker
         tracker = FIFOTracker(db_path=os.path.join(_test_db_dir, "fifo3.db"))
 
-        tracker.add_lot("AAPL", 10, 100.0, date(2026, 1, 1))
+        tracker.add_lot("AAPL", 10, 100.0, "2026-01-01")
 
         # Try to sell 20 — should either raise or return max available
         try:
-            consumed = tracker.consume_lots("AAPL", 20)
+            consumed = tracker.consume_lots("AAPL", 20, 150.0, "2026-03-01")
             # If it returns, verify we only got 10
-            total_qty = sum(c[0] for c in consumed)
+            total_qty = sum(c.qty for c in consumed)
             assert total_qty <= 10
         except (ValueError, Exception):
             pass  # Also acceptable
@@ -83,8 +83,8 @@ class TestFIFOTracker:
         from src.tax.corporate_tax import FIFOTracker
         tracker = FIFOTracker(db_path=os.path.join(_test_db_dir, "fifo4.db"))
 
-        tracker.add_lot("SAP.DE", 100, 150.0, date(2026, 1, 1))
-        tracker.add_lot("SAP.DE", 100, 170.0, date(2026, 2, 1))
+        tracker.add_lot("SAP.DE", 100, 150.0, "2026-01-01")
+        tracker.add_lot("SAP.DE", 100, 170.0, "2026-02-01")
 
         avg = tracker.get_weighted_avg_price("SAP.DE")
         assert abs(avg - 160.0) < 0.01  # (100*150 + 100*170) / 200 = 160
@@ -144,15 +144,16 @@ class TestMarkToMarket:
         pos = MTMPosition(
             symbol="AAPL",
             qty=100,
-            primo_price=150.0,
-            ultimo_price=170.0,
-            primo_value=15000.0,
-            ultimo_value=17000.0,
-            unrealized_pnl=2000.0,
+            primo_price_dkk=150.0,
+            ultimo_price_dkk=170.0,
+            primo_value_dkk=15000.0,
+            ultimo_value_dkk=17000.0,
+            mtm_pnl_dkk=2000.0,
+            tax_22pct_dkk=440.0,
             currency="USD",
         )
-        assert pos.unrealized_pnl == 2000.0
-        assert pos.ultimo_value - pos.primo_value == 2000.0
+        assert pos.mtm_pnl_dkk == 2000.0
+        assert pos.ultimo_value_dkk - pos.primo_value_dkk == 2000.0
 
 
 # ── Currency P&L ───────────────────────────────────────────
@@ -165,7 +166,7 @@ class TestCurrencyPnL:
         amount = 10_000  # USD
 
         fx_gain = (sell_rate - buy_rate) * amount
-        assert fx_gain == 4_000  # 4.000 DKK gain
+        assert fx_gain == pytest.approx(4_000)  # 4.000 DKK gain
 
 
 # ── Tax Credit Tracker ─────────────────────────────────────
@@ -179,10 +180,11 @@ class TestTaxCreditTracker:
         from src.tax.tax_credit_tracker import CreditProjection
         proj = CreditProjection(
             current_balance=500_000,
-            estimated_usage_ytd=100_000,
-            estimated_year_end_balance=400_000,
+            projected_tax=100_000,
+            projected_offset=100_000,
+            projected_balance=400_000,
         )
-        assert proj.estimated_year_end_balance == 400_000
+        assert proj.projected_balance == 400_000
 
 
 # ── Corporate Tax Report ──────────────────────────────────

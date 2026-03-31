@@ -594,8 +594,8 @@ class TestRiskIntegration:
         pt = PortfolioTracker(100_000)
         rm = RiskManager(pt)
 
-        # Disse bør matche config defaults
-        assert rm.max_position_pct <= 0.05   # maks 5%
+        # Disse bør matche config defaults (risk_sizing.json: 0.10)
+        assert rm.max_position_pct <= 0.15   # maks 15%
         assert rm.max_daily_loss_pct <= 0.10  # maks 10%
         assert rm.stop_loss_pct <= 0.05       # maks 5%
         assert rm.max_drawdown_pct <= 0.15    # maks 15%

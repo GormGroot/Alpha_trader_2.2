@@ -376,7 +376,7 @@ def register_tax_callbacks(app: object) -> None:
         try:
             from src.tax.dividend_tracker import DividendTracker
             tracker = DividendTracker()
-            dividends = tracker.get_ytd_dividends()
+            dividends = tracker.get_dividends(year=datetime.now().year)
             if dividends:
                 header = html.Thead(html.Tr([
                     html.Th(h, style={"color": COLORS["muted"], "padding": "8px",
@@ -386,11 +386,11 @@ def register_tax_callbacks(app: object) -> None:
                 rows = []
                 for d in dividends[:20]:
                     rows.append(html.Tr([
-                        html.Td(d.get("date", ""), style={"color": COLORS["muted"]}),
-                        html.Td(d.get("symbol", ""), style={"color": COLORS["accent"]}),
-                        html.Td(f"{d.get('gross', 0):,.2f}", style={"color": COLORS["text"]}),
-                        html.Td(f"{d.get('tax', 0):,.2f}", style={"color": COLORS["red"]}),
-                        html.Td(f"{d.get('net', 0):,.2f}", style={"color": COLORS["green"]}),
+                        html.Td(getattr(d, "pay_date", ""), style={"color": COLORS["muted"]}),
+                        html.Td(getattr(d, "symbol", ""), style={"color": COLORS["accent"]}),
+                        html.Td(f"{getattr(d, 'gross_dkk', 0):,.2f}", style={"color": COLORS["text"]}),
+                        html.Td(f"{getattr(d, 'withholding_dkk', 0):,.2f}", style={"color": COLORS["red"]}),
+                        html.Td(f"{getattr(d, 'net_dkk', 0):,.2f}", style={"color": COLORS["green"]}),
                     ], style={"borderBottom": f"1px solid {COLORS['border']}"}))
                 dividends_content = html.Table(
                     [header, html.Tbody(rows)],
@@ -421,8 +421,8 @@ def register_tax_callbacks(app: object) -> None:
                 if history:
                     items = []
                     for entry in history[-5:]:
-                        yr = entry.get("year", "")
-                        amt = entry.get("amount", 0)
+                        yr = getattr(entry, "year", entry.get("year", "") if isinstance(entry, dict) else "")
+                        amt = getattr(entry, "amount_dkk", getattr(entry, "amount", entry.get("amount", 0) if isinstance(entry, dict) else 0))
                         items.append(html.Div([
                             html.Span(f"{yr}: ", style={"color": COLORS["muted"]}),
                             html.Span(f"{amt:+,.0f} DKK", style={
@@ -458,7 +458,7 @@ def register_tax_callbacks(app: object) -> None:
             try:
                 from src.tax.transaction_log import TransactionLog
                 log = TransactionLog()
-                transactions = log.get_all() if hasattr(log, "get_all") else []
+                transactions = log.get_transactions() if hasattr(log, "get_transactions") else []
                 for txn in transactions:
                     rows.append({
                         "type": "trade",
@@ -477,17 +477,17 @@ def register_tax_callbacks(app: object) -> None:
             try:
                 from src.tax.dividend_tracker import DividendTracker
                 tracker = DividendTracker()
-                dividends = tracker.get_ytd_dividends()
+                dividends = tracker.get_dividends(year=datetime.now().year)
                 for d in (dividends or []):
                     rows.append({
                         "type": "dividend",
-                        "date": d.get("date", ""),
-                        "symbol": d.get("symbol", ""),
+                        "date": getattr(d, "pay_date", ""),
+                        "symbol": getattr(d, "symbol", ""),
                         "side": "DIVIDEND",
                         "qty": 0,
                         "price": 0,
-                        "pnl": d.get("net", 0),
-                        "currency": d.get("currency", "DKK"),
+                        "pnl": getattr(d, "net_dkk", 0),
+                        "currency": getattr(d, "currency", "DKK"),
                     })
             except Exception:
                 pass

@@ -47,13 +47,17 @@ class BackupConfig:
         "docker-compose.yml",
     ])
     sqlite_paths: list[str] = field(default_factory=lambda: [
-        "data/orders.db",
-        "data/tax.db",
-        "data/tax_credits.db",
-        "data/mtm.db",
-        "data/dividends.db",
-        "data/fx_pnl.db",
-        "data/fifo_lots.db",
+        "data_cache/orders.db",
+        "data_cache/paper_portfolio.db",
+        "data_cache/auto_trader_log.db",
+        "data_cache/fifo_lots.db",
+        "data_cache/tax_credit.db",
+        "data_cache/mark_to_market.db",
+        "data_cache/dividends.db",
+        "data_cache/currency_pnl.db",
+        "data_cache/learning.db",
+        "data_cache/signal_log.db",
+        "data_cache/audit_log.db",
     ])
 
     @classmethod

@@ -71,7 +71,7 @@ class MarketHandoffEngine:
         "japan":       {"hong_kong": 0.6, "india": 0.3, "eu": 0.2},
         "hong_kong":   {"india": 0.5,     "eu": 0.3, "us": 0.1},
         "india":       {"eu": 0.4,        "us": 0.2},
-        "eu":          {"us": 0.5},
+        "eu":          {"us": 0.5},  # NB: "eu" dækker EU+Nordic (exchange_limits bruger "eu_nordic")
         "us":          {"new_zealand": 0.7, "australia": 0.5, "japan": 0.4},
     }
 

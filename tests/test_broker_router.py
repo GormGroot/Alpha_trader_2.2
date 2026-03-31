@@ -41,7 +41,7 @@ class MockBroker:
     def buy(self, symbol, qty, order_type="market", limit_price=None):
         self.buy_calls.append((symbol, qty, order_type, limit_price))
         return Order(
-            id=f"ORD-{self.name}-001",
+            order_id=f"ORD-{self.name}-001",
             symbol=symbol,
             side=OrderSide.BUY,
             qty=qty,
@@ -49,10 +49,10 @@ class MockBroker:
             status=OrderStatus.SUBMITTED,
         )
 
-    def sell(self, symbol, qty, order_type="market", limit_price=None):
+    def sell(self, symbol, qty, order_type="market", limit_price=None, short=False):
         self.sell_calls.append((symbol, qty, order_type, limit_price))
         return Order(
-            id=f"ORD-{self.name}-001",
+            order_id=f"ORD-{self.name}-001",
             symbol=symbol,
             side=OrderSide.SELL,
             qty=qty,
@@ -65,12 +65,14 @@ class MockBroker:
 
     def get_account(self):
         return AccountInfo(
+            account_id="mock-account",
             equity=100000, cash=50000, buying_power=50000,
+            portfolio_value=50000,
         )
 
     def get_order_status(self, order_id):
         return Order(
-            id=order_id, symbol="AAPL", side=OrderSide.BUY,
+            order_id=order_id, symbol="AAPL", side=OrderSide.BUY,
             qty=10, order_type=OrderType.MARKET, status=OrderStatus.FILLED,
         )
 
@@ -114,20 +116,20 @@ class TestDetectExchange:
         assert detect_exchange("AZN.L") == "LSE"
 
     def test_amsterdam(self):
-        assert detect_exchange("ASML.AS") == "AMS"
+        assert detect_exchange("ASML.AS") == "AEB"
 
     def test_paris(self):
-        assert detect_exchange("MC.PA") == "PAR"
-        assert detect_exchange("TTE.PA") == "PAR"
+        assert detect_exchange("MC.PA") == "SBF"
+        assert detect_exchange("TTE.PA") == "SBF"
 
     def test_oslo(self):
         assert detect_exchange("EQNR.OL") == "OSE"
 
     def test_helsinki(self):
-        assert detect_exchange("ORNBV.HE") == "HEL"
+        assert detect_exchange("ORNBV.HE") == "HEX"
 
     def test_swiss(self):
-        assert detect_exchange("ROG.SW") == "SIX"
+        assert detect_exchange("ROG.SW") == "EBS"
 
     def test_us_no_suffix(self):
         # US stocks have no suffix — should return None or 'US'
@@ -245,9 +247,9 @@ class TestBrokerRouterEdgeCases:
             pass  # Also acceptable
 
     def test_empty_symbol(self, router):
-        """Tomt symbol bør fejle gracefully."""
+        """Tomt symbol via buy bør fejle gracefully."""
         with pytest.raises((RoutingError, ValueError, Exception)):
-            router.resolve_broker("")
+            router.buy("", 10)
 
     def test_register_duplicate(self, router):
         """Registrering af samme navn bør overskrive."""

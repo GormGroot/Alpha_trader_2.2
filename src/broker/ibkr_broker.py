@@ -493,7 +493,11 @@ class IBKRBroker(BaseBroker):
             ),
             filled_qty=filled_qty,
             filled_avg_price=avg_price,
-            submitted_at=datetime.now().isoformat(),
+            submitted_at=(
+                trade.log[-1].time.isoformat()
+                if trade.log
+                else datetime.now().isoformat()
+            ),
         )
 
     # ── Extra: Instrument Search ────────────────────────────

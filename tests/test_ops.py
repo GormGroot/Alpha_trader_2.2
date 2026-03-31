@@ -28,7 +28,7 @@ class TestDailyScheduler:
         from src.ops.daily_scheduler import DailyScheduler
         scheduler = DailyScheduler()
         schedule = scheduler.get_schedule()
-        assert len(schedule) == 6
+        assert len(schedule) >= 6  # Expanded to 24/7 global coverage
         names = [t["name"] for t in schedule]
         assert "morning_check" in names
         assert "eu_market_open" in names

@@ -57,13 +57,18 @@ def _load_fee_config() -> dict:
         return yaml.safe_load(f)
 
 
+import threading as _threading
+
 _FEE_CONFIG: dict | None = None
+_FEE_CONFIG_LOCK = _threading.Lock()
 
 
 def _get_config() -> dict:
     global _FEE_CONFIG
     if _FEE_CONFIG is None:
-        _FEE_CONFIG = _load_fee_config()
+        with _FEE_CONFIG_LOCK:
+            if _FEE_CONFIG is None:  # Double-check after lock
+                _FEE_CONFIG = _load_fee_config()
     return _FEE_CONFIG
 
 

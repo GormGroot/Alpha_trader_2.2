@@ -141,7 +141,8 @@ class TestPaperBrokerMarketOrders:
         pb = _make_paper_broker(price=100.0)
         pb.buy("AAPL", 10)
         acct = pb.get_account()
-        assert acct.cash == pytest.approx(99_000)
+        # 100k - 10*100 - fee (0.15% of 1000 = 1.50) = 98998.50
+        assert acct.cash == pytest.approx(98_998.5)
 
     def test_buy_creates_position(self):
         pb = _make_paper_broker(price=100.0)
@@ -173,8 +174,9 @@ class TestPaperBrokerMarketOrders:
         pb._market_data.get_latest_price.return_value = 120.0
         pb.sell("AAPL", 10)
         acct = pb.get_account()
-        # Started 100k, bought 10@100=1000, sold 10@120=1200
-        assert acct.cash == pytest.approx(100_200)
+        # Started 100k, bought 10@100=1000+fee1.50, sold 10@120=1200-fee1.80
+        # cash = 100000 - 1001.50 + 1198.20 = 100196.70
+        assert acct.cash == pytest.approx(100_196.7)
 
     def test_multiple_buys_different_symbols(self):
         pb = _make_paper_broker(price=100.0)
@@ -278,8 +280,9 @@ class TestPaperBrokerAccount:
         pb = _make_paper_broker(price=100.0)
         pb.buy("AAPL", 100)
         acct = pb.get_account()
-        # cash = 90k, position = 100*100 = 10k, equity = 100k
-        assert acct.equity == pytest.approx(100_000)
+        # cash = 100k - 10000 - fee(15) = 89985, position = 100*100 = 10000
+        # equity = 89985 + 10000 = 99985
+        assert acct.equity == pytest.approx(99_985)
 
     def test_portfolio_property(self):
         pb = _make_paper_broker()

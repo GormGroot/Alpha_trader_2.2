@@ -11,6 +11,7 @@ Alle notifikationer gemmes i SQLite til historik.
 
 from __future__ import annotations
 
+import html as _html
 import smtplib
 import sqlite3
 from abc import ABC, abstractmethod
@@ -77,6 +78,11 @@ class EmailChannel(NotificationChannel):
         self._from = from_email
         self._to = to_email
         self._configured = bool(smtp_user and smtp_password and to_email)
+        self._send_cooldown: dict[str, float] = {}  # category → last send timestamp
+        self._cooldown_seconds = 300  # 5 min mellem emails per category
+
+    def __repr__(self) -> str:
+        return f"EmailChannel(host={self._host}, user={self._user}, to={self._to})"
 
     @property
     def is_configured(self) -> bool:
@@ -86,6 +92,15 @@ class EmailChannel(NotificationChannel):
         if not self._configured:
             logger.debug("[email] Email ikke konfigureret – springer over")
             return False
+
+        # Rate limiting: max 1 email per 5 min per category
+        import time
+        now = time.time()
+        last_sent = self._send_cooldown.get(category, 0)
+        if now - last_sent < self._cooldown_seconds:
+            logger.debug(f"[email] Rate limited: {category} (cooldown {self._cooldown_seconds}s)")
+            return False
+        self._send_cooldown[category] = now
 
         try:
             msg = MIMEMultipart("alternative")
@@ -113,13 +128,13 @@ class EmailChannel(NotificationChannel):
             <body style="font-family: Arial, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px;">
               <div style="max-width: 600px; margin: 0 auto; background: #16213e; border-radius: 12px; padding: 24px;">
                 <h2 style="color: {'#ff4757' if severity == 'CRITICAL' else '#ffa502' if severity == 'WARNING' else '#00d4aa'};">
-                  {title}
+                  {_html.escape(title)}
                 </h2>
                 <p style="color: #888; font-size: 12px;">
-                  {severity} | {category} | {datetime.now().strftime('%d-%m-%Y %H:%M')}
+                  {_html.escape(severity)} | {_html.escape(category)} | {datetime.now().strftime('%d-%m-%Y %H:%M')}
                 </p>
                 <div style="background: #0f3460; padding: 16px; border-radius: 8px; margin: 16px 0;">
-                  <pre style="white-space: pre-wrap; color: #e0e0e0; margin: 0;">{message}</pre>
+                  <pre style="white-space: pre-wrap; color: #e0e0e0; margin: 0;">{_html.escape(message)}</pre>
                 </div>
                 <p style="color: #666; font-size: 11px; margin-top: 24px;">
                   Alpha Trading Platform – Automatisk notifikation<br/>

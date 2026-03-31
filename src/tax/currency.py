@@ -152,6 +152,8 @@ class CurrencyConverter:
         resp.raise_for_status()
 
         count = 0
+        date_idx = None
+        value_idx = None
         for line in resp.text.splitlines():
             parts = line.split(",")
             # ECB CSV: kolonne med dato (TIME_PERIOD) og kurs (OBS_VALUE)
@@ -171,6 +173,8 @@ class CurrencyConverter:
                     )
                 continue
 
+            if date_idx is None or value_idx is None:
+                continue
             try:
                 date_val = parts[date_idx].strip()
                 rate_val = float(parts[value_idx].strip())

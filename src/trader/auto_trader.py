@@ -245,7 +245,9 @@ class AutoTrader:
             if _rs_path.exists():
                 _rs = _json.loads(_rs_path.read_text())
                 if "max_position_pct" in _rs:
-                    position_size_pct = _rs["max_position_pct"] / 100.0
+                    _val = _rs["max_position_pct"]
+                    # Auto-detect: >1 = procent (15 = 15%), <=1 = decimal (0.15 = 15%)
+                    position_size_pct = _val / 100.0 if _val > 1 else _val
                     self.position_size_pct = position_size_pct
                     logger.info(f"[auto] Loaded position_size_pct override: {position_size_pct:.1%}")
                 if "max_dkk_per_symbol" in _rs:
@@ -255,8 +257,9 @@ class AutoTrader:
             pass
 
         # Adaptive thresholds (adjusted by feedback loop)
+        # NB: _base_position_size_pct sættes FØR config-override for korrekt feedback-loop
         self._base_min_confidence = min_confidence
-        self._base_position_size_pct = position_size_pct
+        self._base_position_size_pct = self.position_size_pct
 
         # SQLite log
         self._db_path = Path(data_dir) / "auto_trader_log.db"
@@ -361,8 +364,8 @@ class AutoTrader:
                 self._pre_weekend_settings["trailing_stop_pct"] = getattr(rm, "trailing_stop_pct", 0.03)
 
             # ── Close non-crypto positions ────────────────
-            positions = list(getattr(self, "_portfolio", {}).get("positions", {}).keys())
-            if hasattr(self, "_portfolio") and hasattr(self._portfolio, "positions"):
+            positions = []
+            if hasattr(self, "_portfolio") and self._portfolio is not None and hasattr(self._portfolio, "positions"):
                 positions = list(self._portfolio.positions.keys())
 
             closed_count = 0
@@ -637,6 +640,7 @@ class AutoTrader:
                     self.min_agreement      = 2
                     self.cooldown_minutes   = 15
                     self._aggressive_mode   = False
+                    self._target_reached_at = datetime.now().isoformat()
             except Exception:
                 pass
 
@@ -762,10 +766,11 @@ class AutoTrader:
                 # Apply regime max exposure to position sizing
                 if regime_adj.max_exposure_pct < 1.0:
                     regime_cap = regime_adj.max_exposure_pct
-                    self.position_size_pct = min(
-                        self.position_size_pct,
-                        self._base_position_size_pct * regime_cap,
-                    )
+                    # Beregn fra base — IKKE fra nuværende (undgår monotont fald)
+                    self.position_size_pct = self._base_position_size_pct * regime_cap
+                else:
+                    # Regime er normalt — gendan base position size
+                    self.position_size_pct = self._base_position_size_pct
 
                 # Apply stop-loss multiplier to risk manager
                 if self._risk_manager and regime_adj.stop_loss_multiplier != 1.0:
@@ -848,9 +853,9 @@ class AutoTrader:
         result.duration_sec = time.time() - t0
         self._log_scan(result)
 
-        # Free large scan data to reduce memory pressure
+        # Free large scan data
         del data
-        gc.collect()
+        # gc.collect() fjernet — periodisk cleanup (hvert 100. scan) er tilstrækkeligt
 
         logger.info(
             f"[auto] ═══ Scan #{self._total_scans} færdig: "
@@ -946,24 +951,15 @@ class AutoTrader:
                 prices[sym] = float(df["Close"].iloc[-1])
 
         try:
-            # Apply per-exchange stop-loss overrides before checking
-            default_sl = self._risk_manager.stop_loss_pct
-            if self._exchange_stop_loss:
-                for sym in prices:
-                    override = self.get_stop_loss_for_symbol(sym)
-                    if override is not None:
-                        self._risk_manager.stop_loss_pct = override
-                        break  # batch check uses single threshold — see per-symbol below
-
+            # Batch check med default stop-loss (muterer IKKE delt state)
             exit_signals = self._risk_manager.check_positions(prices)
 
-            # Per-symbol override: re-check with exchange-specific stop-loss
+            # Per-symbol override: check ALLE positioner mod exchange-specifik stop-loss
             if self._exchange_stop_loss:
-                self._risk_manager.stop_loss_pct = default_sl
                 exit_set = {s.symbol for s in exit_signals}
                 for sym, pos in self._risk_manager.portfolio.positions.items():
                     if sym in exit_set:
-                        continue  # already flagged
+                        continue  # allerede flagget af batch check
                     override = self.get_stop_loss_for_symbol(sym)
                     if override is not None and pos.unrealized_pnl_pct <= -override:
                         from src.risk.risk_manager import ExitSignal
@@ -973,7 +969,6 @@ class AutoTrader:
                             message=f"Exchange stop-loss: {pos.unrealized_pnl_pct:.2%} <= -{override:.2%}",
                             trigger_price=prices.get(sym, pos.current_price),
                         ))
-                self._risk_manager.stop_loss_pct = default_sl
 
             for sig in exit_signals:
                 qty = self._get_position_qty(sig.symbol)
@@ -1242,25 +1237,29 @@ class AutoTrader:
             self._total_trades                 += 1
             self._last_trade[action.symbol]     = _now_cet()
 
-            # Sync to risk manager portfolio
+            # Sync to risk manager portfolio (kun hvis RM har sin EGEN portfolio)
+            # Hvis broker og RM deler portfolio-instans, er den allerede opdateret
             if self._risk_manager and hasattr(self._risk_manager, "portfolio"):
-                try:
-                    rm_port = self._risk_manager.portfolio
-                    price = getattr(order, "filled_avg_price", 0) or getattr(order, "price", 0) or 0
-                    if action.side == "BUY":
-                        rm_port.open_position(
-                            symbol=action.symbol,
-                            qty=action.qty,
-                            entry_price=price,
-                            side="long",
-                        )
-                    else:
-                        rm_port.close_position(
-                            symbol=action.symbol,
-                            exit_price=price,
-                        )
-                except Exception:
-                    pass
+                rm_port = self._risk_manager.portfolio
+                broker_port = getattr(self, "_portfolio", None)
+                if rm_port is not broker_port:
+                    try:
+                        price = getattr(order, "filled_avg_price", 0) or getattr(order, "price", 0) or 0
+                        if action.side == "BUY":
+                            rm_port.open_position(
+                                symbol=action.symbol,
+                                qty=action.qty,
+                                entry_price=price,
+                                side="long",
+                            )
+                        else:
+                            rm_port.close_position(
+                                symbol=action.symbol,
+                                price=price,
+                                reason=action.reason or "signal",
+                            )
+                    except Exception as e:
+                        logger.warning(f"[auto] RM portfolio sync fejl: {e}")
 
             logger.info(
                 f"[auto] ✓ {action.side} {action.qty:.1f} {action.symbol} "

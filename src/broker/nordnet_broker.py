@@ -273,8 +273,11 @@ class NordnetBroker(BaseBroker):
         qty: float,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        short: bool = False,
     ) -> Order:
         """Placér en salgsordre via Nordnet."""
+        if short:
+            raise NotImplementedError("Short-selling er ikke understøttet via Nordnet")
         self._validate_order(symbol, qty, order_type, limit_price)
         self._ensure_connected()
 

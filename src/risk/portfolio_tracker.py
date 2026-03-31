@@ -351,8 +351,15 @@ class PortfolioTracker:
         cost = qty * price
 
         if side == "short":
-            # Short: vi modtager proceeds ved salg
+            # Short: vi modtager proceeds, men reserverer margin (150% af cost)
+            margin_requirement = cost * 1.5
+            if margin_requirement > self.cash + cost:
+                raise ValueError(
+                    f"Ikke nok margin til short: kræver ${margin_requirement:,.2f}, "
+                    f"har ${self.cash:,.2f} + ${cost:,.2f} proceeds"
+                )
             self.cash += cost
+            self.cash -= margin_requirement  # Reserver margin
         else:
             # Long: vi betaler for aktierne
             if cost > self.cash:
@@ -409,7 +416,10 @@ class PortfolioTracker:
         proceeds = sell_qty * price
 
         if pos.side == "short":
-            self.cash -= proceeds
+            # Frigiv margin-reservation (150% af entry cost) og betal buy-back
+            margin_reserved = sell_qty * pos.entry_price * 1.5
+            self.cash += margin_reserved  # Frigiv margin
+            self.cash -= proceeds         # Betal buy-back cost
         else:
             self.cash += proceeds
 
@@ -462,16 +472,31 @@ class PortfolioTracker:
     # ── Portfolio metrics ────────────────────────────────────
 
     @property
+    def _short_margin_reserved(self) -> float:
+        """Total margin reserveret for åbne short-positioner."""
+        return sum(
+            p.qty * p.entry_price * 1.5
+            for p in self.positions.values() if p.side == "short"
+        )
+
+    @property
+    def available_cash(self) -> float:
+        """Kontanter tilgængelige for nye handler (ekskl. margin-reservationer)."""
+        return self.cash
+
+    @property
     def total_equity(self) -> float:
-        """Samlet porteføljeværdi: kontanter + long markedsværdi - short liability.
+        """Samlet porteføljeværdi: kontanter + long markedsværdi + short P&L.
 
         Long: vi ejer aktier → market_value er et aktiv.
-        Short: vi skylder aktier → market_value er en liability.
-        Cash inkluderer allerede short proceeds fra open_position.
+        Short: margin er reserveret i cash, P&L afspejles via unrealized_pnl.
+        Cash er allerede reduceret med margin ved short-åbning.
         """
         long_val = sum(p.market_value for p in self.positions.values() if p.side == "long")
-        short_val = sum(p.market_value for p in self.positions.values() if p.side == "short")
-        return self.cash + long_val - short_val
+        short_pnl = sum(p.unrealized_pnl for p in self.positions.values() if p.side == "short")
+        # Cash inkluderer margin-reservationer. Long values er aktiver.
+        # Short P&L justerer for urealiseret gevinst/tab på shorts.
+        return self.cash + long_val + short_pnl
 
     @property
     def total_unrealized_pnl(self) -> float:
@@ -552,11 +577,15 @@ class PortfolioTracker:
         if len(self._equity_history) < 3:
             return 0.0
 
-        returns = np.diff(self._equity_history) / np.array(self._equity_history[:-1])
-        if len(returns) < 2 or np.std(returns) == 0:
+        eq_arr = np.array(self._equity_history[:-1])
+        if np.any(eq_arr <= 0):
+            return 0.0  # Undgå division by zero ved wipeout
+        returns = np.diff(self._equity_history) / eq_arr
+        std = np.std(returns, ddof=1)  # Sample std (ddof=1) for korrekt Sharpe
+        if len(returns) < 2 or std == 0:
             return 0.0
 
-        return float(np.mean(returns) / np.std(returns) * np.sqrt(252))
+        return float(np.mean(returns) / std * np.sqrt(252))
 
     def start_new_day(self) -> None:
         """Markér start af ny handelsdag (nulstil daglig P&L)."""
@@ -569,7 +598,10 @@ class PortfolioTracker:
         equity = self.total_equity
         if equity == 0 or symbol not in self.positions:
             return 0.0
-        return self.positions[symbol].market_value / equity
+        pos = self.positions[symbol]
+        # Shorts er liabilities — brug abs for vægt, men behold fortegn
+        val = pos.market_value if pos.side == "long" else -pos.market_value
+        return val / equity
 
     def summary(self) -> dict:
         """Returnér en dict med alle portfolio-metrics."""

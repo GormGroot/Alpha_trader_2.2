@@ -110,7 +110,7 @@ class ConnectionManager:
         self._response_history: dict[str, list[float]] = {}  # Sliding window
         self._running = False
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock: check_broker() tager lock, og _monitor_loop kalder check_all() med lock
 
     # ── Registration ────────────────────────────────────────
 
@@ -160,6 +160,11 @@ class ConnectionManager:
             logger.warning(f"[conn] Broker '{name}' ikke registreret")
             return BrokerHealth(broker_name=name, status=ConnectionStatus.UNKNOWN)
 
+        with self._lock:
+            return self._do_check_broker(name, broker, health)
+
+    def _do_check_broker(self, name: str, broker, health: BrokerHealth) -> BrokerHealth:
+        """Intern health check — kald kun med self._lock holdt."""
         old_status = health.status
         health.total_checks += 1
         health.last_check = datetime.now()

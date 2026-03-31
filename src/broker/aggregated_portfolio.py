@@ -382,7 +382,7 @@ class AggregatedPortfolio:
                     cost_basis=total_cost,
                     unrealized_pnl=total_pnl,
                     unrealized_pnl_pct=(
-                        total_pnl / total_cost if total_cost > 0 else 0
+                        total_pnl / total_cost if abs(total_cost) > 0.01 else 0
                     ),
                     currency=existing.currency,
                     market_value_dkk=total_value_dkk,

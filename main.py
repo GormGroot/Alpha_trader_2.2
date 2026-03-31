@@ -166,8 +166,8 @@ def setup_connection_monitor(router: object) -> object | None:
     try:
         from src.broker.connection_manager import ConnectionManager
         cm = ConnectionManager()
-        for name, broker in router._brokers.items():
-            cm.register(name, broker)
+        for name in router.available_brokers:
+            cm.register(name, router.get_broker(name))
 
         # Alert callback
         from src.ops.email_reports import EmailReportRunner
