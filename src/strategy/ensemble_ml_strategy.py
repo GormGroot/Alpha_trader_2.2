@@ -1166,3 +1166,75 @@ class EnsembleMLStrategy(BaseStrategy):
     def print_explanation(self) -> None:
         """Print forklaring til konsol."""
         print(self.explain())
+
+    # ── Persistence ───────────────────────────────────────────
+
+    def save(self, path: str | Path) -> Path:
+        """
+        Gem trænet ensemble model til disk med joblib.
+
+        Gemmer alle 3 delmodeller + metadata.
+        Returnerer den faktiske sti filen er gemt på.
+        """
+        import joblib
+        from pathlib import Path as _Path
+
+        if not self._is_trained:
+            raise RuntimeError("Model ikke trænet – kald train() først")
+
+        path = _Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "rf_model":             self._rf_model,
+            "xgb_model":            self._xgb_model,
+            "lr_model":             self._lr_model,
+            "feature_columns":      self._feature_columns,
+            "metrics":              self._metrics,
+            "performance_history":  self._performance_history,
+            "threshold":            self.threshold,
+            "confidence_min":       self.confidence_min,
+            "horizon":              self.horizon,
+            "min_agreement":        self.min_agreement,
+            "retrain_interval_days": self.retrain_interval_days,
+            "saved_at":             datetime.utcnow().isoformat(),
+            "version":              "EnsembleMLStrategy_v1",
+        }
+        joblib.dump(payload, path, compress=3)
+        logger.info(f"[Ensemble] Model gemt: {path} ({path.stat().st_size / 1024:.0f} KB)")
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "EnsembleMLStrategy":
+        """
+        Indlæs en gemt ensemble model fra disk.
+
+        Returnerer en klar-til-brug EnsembleMLStrategy instans.
+        """
+        import joblib
+        from pathlib import Path as _Path
+
+        path = _Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Model ikke fundet: {path}")
+
+        payload = joblib.load(path)
+
+        instance = cls(
+            threshold=payload.get("threshold", 0.01),
+            confidence_min=payload.get("confidence_min", 0.55),
+            horizon=payload.get("horizon", 5),
+            min_agreement=payload.get("min_agreement", 2),
+            retrain_interval_days=payload.get("retrain_interval_days", 30),
+        )
+        instance._rf_model  = payload["rf_model"]
+        instance._xgb_model = payload["xgb_model"]
+        instance._lr_model  = payload["lr_model"]
+        instance._feature_columns     = payload["feature_columns"]
+        instance._metrics             = payload.get("metrics")
+        instance._performance_history = payload.get("performance_history", [])
+        instance._is_trained = True
+
+        saved_at = payload.get("saved_at", "ukendt")
+        logger.info(f"[Ensemble] Model indlæst: {path} (gemt {saved_at})")
+        return instance

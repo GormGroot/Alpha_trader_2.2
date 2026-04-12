@@ -540,21 +540,36 @@ class AutoTrader:
             except Exception as e:
                 logger.warning(f"[auto] Pattern strategy failed: {e}")
 
-        # ML Strategy (HistGradientBoosting)
+        # ML Strategy — forsøg at loade Gorm's pre-trænede model fra disk
         try:
             from src.strategy.ml_strategy import MLStrategy
-            ml = MLStrategy()
-            strats.append((ml, 0.25))
-            logger.info("[auto] MLStrategy enabled (0.25 weight)")
+            from pathlib import Path
+            ml_latest = Path("models/ml_latest.joblib")
+            if ml_latest.exists():
+                ml = MLStrategy.load(ml_latest)
+                strats.append((ml, 0.25))
+                logger.info(f"[auto] MLStrategy loaded from {ml_latest} (0.25 weight)")
+            else:
+                # Ingen gemt model — opret ny (utrænet, bruges ikke til signaler endnu)
+                ml = MLStrategy()
+                strats.append((ml, 0.25))
+                logger.info("[auto] MLStrategy enabled untrained — run train_remote.py on Gorm's machine (0.25 weight)")
         except Exception as e:
             logger.debug(f"[auto] ML strategy not available: {e}")
 
-        # Ensemble ML Strategy (RF + XGBoost + LogReg voting)
+        # Ensemble ML Strategy — forsøg at loade Gorm's pre-trænede model fra disk
         try:
             from src.strategy.ensemble_ml_strategy import EnsembleMLStrategy
-            ensemble = EnsembleMLStrategy()
-            strats.append((ensemble, 0.35))
-            logger.info("[auto] EnsembleMLStrategy enabled (0.35 weight)")
+            from pathlib import Path
+            ens_latest = Path("models/ensemble_latest.joblib")
+            if ens_latest.exists():
+                ensemble = EnsembleMLStrategy.load(ens_latest)
+                strats.append((ensemble, 0.35))
+                logger.info(f"[auto] EnsembleMLStrategy loaded from {ens_latest} (0.35 weight)")
+            else:
+                ensemble = EnsembleMLStrategy()
+                strats.append((ensemble, 0.35))
+                logger.info("[auto] EnsembleMLStrategy enabled untrained — run train_remote.py on Gorm's machine (0.35 weight)")
         except Exception as e:
             logger.debug(f"[auto] Ensemble ML strategy not available: {e}")
 
@@ -1179,7 +1194,9 @@ class AutoTrader:
         except Exception:
             equity = 100_000
 
-        confidence_factor = min(confidence / 100.0, 1.0)
+        # Floor på 0.85 sikrer at selv lave-confidence signaler udnytter mindst 85% af
+        # den allokerede plads — målet er at 90-100% af kapitalen er ude og arbejde.
+        confidence_factor = max(min(confidence / 100.0, 1.0), 0.85)
         max_usd           = equity * self.position_size_pct * size_multiplier
         position_usd      = max_usd * confidence_factor
 
@@ -1249,17 +1266,26 @@ class AutoTrader:
                             rm_port.open_position(
                                 symbol=action.symbol,
                                 qty=action.qty,
-                                entry_price=price,
+                                price=price,
                                 side="long",
                             )
                         else:
-                            rm_port.close_position(
-                                symbol=action.symbol,
-                                price=price,
-                                reason=action.reason or "signal",
-                            )
+                            # SELL = enten luk eksisterende long ELLER åbn ny short
+                            if action.symbol in rm_port.positions:
+                                rm_port.close_position(
+                                    symbol=action.symbol,
+                                    price=price,
+                                    reason=action.reason or "signal",
+                                )
+                            else:
+                                rm_port.open_position(
+                                    symbol=action.symbol,
+                                    qty=action.qty,
+                                    price=price,
+                                    side="short",
+                                )
                     except Exception as e:
-                        logger.warning(f"[auto] RM portfolio sync fejl: {e}")
+                        logger.error(f"[auto] RM portfolio sync FEJL — positioner IKKE tracket: {e}", exc_info=True)
 
             logger.info(
                 f"[auto] ✓ {action.side} {action.qty:.1f} {action.symbol} "

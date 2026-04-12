@@ -25,7 +25,11 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
 from loguru import logger
+
+# Load .env (API keys etc.) fra projektets rod
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # ── Paths ──────────────────────────────────────────────────
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -327,11 +331,11 @@ def setup_scheduler_with_auto_trader(auto_trader=None) -> object | None:
 
         # Start continuous scan loop (hvert 15. minut under markedstid)
         if auto_trader is not None:
-            scan_thread, scan_stop_event = start_continuous_scanner(auto_trader, interval_minutes=1)
+            scan_thread, scan_stop_event = start_continuous_scanner(auto_trader, interval_minutes=10)
             # Store thread + stop_event on scheduler for graceful shutdown (H-19)
             scheduler._scan_thread = scan_thread
             scheduler._scan_stop_event = scan_stop_event
-            logger.info("[startup] Continuous scanner started (1 min interval — LIVE mode)")
+            logger.info("[startup] Continuous scanner started (10 min interval)")
 
         return scheduler
     except Exception as e:
@@ -373,6 +377,7 @@ def start_continuous_scanner(auto_trader, interval_minutes: int = 1) -> tuple[th
 
             # Scanner kører alle handelsdage — MarketCalendar håndterer hvilke symboler
             if is_market_day(today):
+                wait_time = interval_minutes * 60
                 try:
                     # Check hvilke markeder er åbne nu
                     open_markets = []
@@ -386,14 +391,19 @@ def start_continuous_scanner(auto_trader, interval_minutes: int = 1) -> tuple[th
                         f"[scanner] ── Scan kl. {now:%H:%M} CET ──"
                         f" Åbne markeder: {open_markets or ['alle']}"
                     )
+                    scan_start = time.time()
                     result = auto_trader.scan_and_trade()
+                    scan_duration = time.time() - scan_start
                     trades = result.trades_executed
                     if trades > 0:
                         logger.info(f"[scanner] {trades} handler udført!")
+                    # Wait mindst interval_minutes, men længere hvis scan tog lang tid
+                    wait_time = max(interval_minutes * 60, scan_duration * 1.5)
+                    logger.info(f"[scanner] Scan tog {scan_duration:.0f}s — næste om {wait_time:.0f}s")
                 except Exception as e:
                     logger.error(f"[scanner] Scan fejl: {e}")
 
-                _stop.wait(timeout=interval_minutes * 60)
+                _stop.wait(timeout=wait_time)
 
             else:
                 # Weekend — kun crypto scanner hvert 5. minut
@@ -405,9 +415,15 @@ def start_continuous_scanner(auto_trader, interval_minutes: int = 1) -> tuple[th
                         if _CRYPTO_PATTERN.match(s.upper())
                     ]
                     if crypto_symbols:
-                        result = auto_trader.scan_and_trade(symbols=crypto_symbols)
-                        if result.trades_executed > 0:
-                            logger.info(f"[scanner] Crypto: {result.trades_executed} handler")
+                        # scan_and_trade() har ingen symbols-parameter — filtrér watchlist midlertidigt
+                        original_watchlist = auto_trader.watchlist[:]
+                        auto_trader.watchlist = crypto_symbols
+                        try:
+                            result = auto_trader.scan_and_trade()
+                            if result.trades_executed > 0:
+                                logger.info(f"[scanner] Crypto: {result.trades_executed} handler")
+                        finally:
+                            auto_trader.watchlist = original_watchlist
                     else:
                         logger.debug("[scanner] Weekend — ingen crypto symboler i watchlist")
                 except Exception as e:
@@ -440,6 +456,25 @@ def run_trader(args: argparse.Namespace) -> None:
     logger.info(f"  Time: {_time_str} (web-synced)")
     logger.info("═══════════════════════════════════════════")
 
+    # SIKKERHED: Kræv eksplicit bekræftelse for live trading
+    if not args.paper:
+        print("\n" + "=" * 50)
+        print("  ⚠️  LIVE TRADING MODE  ⚠️")
+        print("  Du er ved at handle med RIGTIGE PENGE.")
+        print("  Skriv LIVE for at bekræfte, eller Ctrl+C for at stoppe.")
+        print("=" * 50)
+        try:
+            confirmation = input("\n  Bekræft: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAfbrudt.")
+            logger.info("[startup] Live trading afbrudt af bruger")
+            return
+        if confirmation != "LIVE":
+            print("Forkert bekræftelse. Brug --paper for paper trading.")
+            logger.info(f"[startup] Live trading afvist (svar: '{confirmation}')")
+            return
+        logger.info("[startup] Live trading bekræftet af bruger")
+
     # 1. Brokers
     router = setup_brokers(paper=args.paper)
 
@@ -459,6 +494,37 @@ def run_trader(args: argparse.Namespace) -> None:
         auto_trader = setup_auto_trader(router, paper=args.paper)
     else:
         logger.info("[startup] AutoTrader disabled (--no-auto-trade)")
+
+    # 4a. Wire ConnectionManager → RiskManager (afvis ordrer ved broker disconnect)
+    if auto_trader is not None and cm is not None:
+        rm = getattr(auto_trader, '_risk_manager', None)
+        if rm is not None and hasattr(rm, 'set_connection_manager'):
+            rm.set_connection_manager(cm)
+            logger.info("[startup] ConnectionManager → RiskManager wired (broker disconnect = ordre afvist)")
+
+    # 4b. Position-reconciliation — synkronisér broker-positioner med lokal portfolio
+    if not args.paper and auto_trader is not None:
+        try:
+            rm = getattr(auto_trader, '_risk_manager', None)
+            if rm and hasattr(rm, 'portfolio'):
+                broker_positions = router.get_positions()
+                synced = 0
+                for pos in broker_positions:
+                    if pos.symbol not in rm.portfolio.positions:
+                        rm.portfolio.open_position(
+                            symbol=pos.symbol,
+                            qty=pos.qty,
+                            price=pos.current_price or pos.entry_price,
+                            side=pos.side,
+                        )
+                        synced += 1
+                        logger.info(f"[reconcile] Synkroniseret: {pos.symbol} ({pos.side}, {pos.qty} @ ${pos.entry_price:.2f})")
+                if synced > 0:
+                    logger.info(f"[reconcile] {synced} broker-positioner synkroniseret til lokal portfolio")
+                else:
+                    logger.info("[reconcile] Ingen åbne broker-positioner at synkronisere")
+        except Exception as e:
+            logger.warning(f"[reconcile] Position-reconciliation fejlede: {e}")
 
     # 5. Scheduler med AutoTrader integreret
     scheduler = None
@@ -489,7 +555,15 @@ def run_trader(args: argparse.Namespace) -> None:
         logger.info(f"  ✓ Learning Engine: feedback loop + drift detection + krise-scanning")
     logger.info("═══════════════════════════════════════════")
 
-    # 7. Dashboard
+    # 7. Mobile API (port 8051)
+    try:
+        from src.api.server import start_api_server
+        start_api_server(host="0.0.0.0", port=8051, background=True)
+        logger.info("[startup] Mobile API started on http://0.0.0.0:8051")
+    except Exception as _api_err:
+        logger.warning(f"[startup] Mobile API ikke startet: {_api_err}")
+
+    # 8. Dashboard
     if not args.no_dashboard:
         run_dashboard(
             host=args.host,

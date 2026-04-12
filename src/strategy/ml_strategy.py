@@ -576,3 +576,76 @@ class MLStrategy(BaseStrategy):
     def print_explanation(self) -> None:
         """Print forklaring til konsol."""
         print(self.explain())
+
+    # ── Persistence ───────────────────────────────────────────
+
+    def save(self, path: str | Path) -> Path:
+        """
+        Gem trænet model til disk med joblib.
+
+        Gemmer model + metadata (metrics, feature_columns, hyperparametre).
+        Returnerer den faktiske sti filen er gemt på.
+
+        Eksempel:
+            path = model.save("models/ml_model_20260412.joblib")
+        """
+        import joblib
+
+        if not self._is_trained:
+            raise RuntimeError("Model ikke trænet – kald train() først")
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "model":            self._model,
+            "feature_columns":  self._feature_columns,
+            "metrics":          self._metrics,
+            "horizon":          self.horizon,
+            "threshold":        self.threshold,
+            "confidence_min":   self.confidence_min,
+            "n_estimators":     self._n_estimators,
+            "max_depth":        self._max_depth,
+            "learning_rate":    self._learning_rate,
+            "saved_at":         datetime.utcnow().isoformat(),
+            "version":          "MLStrategy_v1",
+        }
+        joblib.dump(payload, path, compress=3)
+        logger.info(f"[ML] Model gemt: {path} ({path.stat().st_size / 1024:.0f} KB)")
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "MLStrategy":
+        """
+        Indlæs en gemt model fra disk.
+
+        Returnerer en klar-til-brug MLStrategy instans.
+
+        Eksempel:
+            model = MLStrategy.load("models/ml_model_20260412.joblib")
+            signal = model.analyze(df)
+        """
+        import joblib
+
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Model ikke fundet: {path}")
+
+        payload = joblib.load(path)
+
+        instance = cls(
+            threshold=payload.get("threshold", 0.0),
+            confidence_min=payload.get("confidence_min", 0.55),
+            horizon=payload.get("horizon", 1),
+            n_estimators=payload.get("n_estimators", 200),
+            max_depth=payload.get("max_depth", 5),
+            learning_rate=payload.get("learning_rate", 0.05),
+        )
+        instance._model = payload["model"]
+        instance._feature_columns = payload["feature_columns"]
+        instance._metrics = payload.get("metrics")
+        instance._is_trained = True
+
+        saved_at = payload.get("saved_at", "ukendt")
+        logger.info(f"[ML] Model indlæst: {path} (gemt {saved_at})")
+        return instance

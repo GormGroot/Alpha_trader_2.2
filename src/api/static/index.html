@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Alpha Trader">
+  <meta name="theme-color" content="#0f0f1a">
+  <link rel="manifest" href="/manifest.json">
+  <title>Alpha Trader</title>
+  <style>
+    :root {
+      --bg:       #0f0f1a;
+      --bg2:      #16213e;
+      --bg3:      #1a2040;
+      --blue:     #0077FD;
+      --green:    #34C759;
+      --red:      #FF2F00;
+      --orange:   #FF9F0A;
+      --text:     #e0e0e0;
+      --muted:    #888;
+      --border:   #2a3050;
+      --radius:   12px;
+      --tab-h:    68px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; height: 100vh; }
+
+    /* ── Login ── */
+    #login-screen {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100vh; padding: 32px; gap: 20px;
+    }
+    #login-screen h1 { font-size: 28px; color: var(--blue); }
+    #login-screen p { color: var(--muted); font-size: 14px; }
+    .input-group { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+    input {
+      width: 100%; padding: 14px 16px; background: var(--bg2); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 16px; outline: none;
+    }
+    input:focus { border-color: var(--blue); }
+    .btn {
+      width: 100%; padding: 14px; background: var(--blue); color: #fff; border: none;
+      border-radius: var(--radius); font-size: 16px; font-weight: 600; cursor: pointer;
+    }
+    .btn:active { opacity: 0.8; }
+    .error-msg { color: var(--red); font-size: 13px; text-align: center; min-height: 18px; }
+
+    /* ── App shell ── */
+    #app { display: none; height: 100vh; flex-direction: column; }
+    #app.visible { display: flex; }
+
+    /* ── Header ── */
+    header {
+      background: var(--bg2); padding: 12px 16px 10px;
+      padding-top: max(12px, env(safe-area-inset-top));
+      border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+    }
+    header h1 { font-size: 18px; color: var(--blue); font-weight: 700; }
+    #last-updated { font-size: 11px; color: var(--muted); }
+    #refresh-btn { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 4px; }
+
+    /* ── Content ── */
+    #content { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 0 8px; }
+
+    /* ── Tab bar ── */
+    nav {
+      background: var(--bg2); border-top: 1px solid var(--border);
+      display: flex; height: var(--tab-h);
+      padding-bottom: var(--safe-bottom); flex-shrink: 0;
+    }
+    .tab {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 3px; cursor: pointer; color: var(--muted); font-size: 10px; padding: 8px 4px;
+      transition: color 0.15s; border: none; background: none;
+    }
+    .tab .icon { font-size: 22px; line-height: 1; }
+    .tab.active { color: var(--blue); }
+    .tab.active .icon { filter: drop-shadow(0 0 6px var(--blue)); }
+
+    /* ── Screens ── */
+    .screen { display: none; padding: 16px; }
+    .screen.active { display: block; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--bg2); border-radius: var(--radius); padding: 16px;
+      margin-bottom: 12px; border: 1px solid var(--border);
+    }
+    .card-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+
+    /* ── Stat grid ── */
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .stat { background: var(--bg2); border-radius: var(--radius); padding: 14px 12px; border: 1px solid var(--border); }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .stat-value { font-size: 22px; font-weight: 700; }
+    .stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Colors ── */
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .blue { color: var(--blue); }
+    .orange { color: var(--orange); }
+    .muted { color: var(--muted); }
+
+    /* ── Equity chart ── */
+    #equity-chart { width: 100%; height: 120px; }
+
+    /* ── Position list ── */
+    .position-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .position-row:last-child { border-bottom: none; }
+    .pos-left .symbol { font-size: 15px; font-weight: 600; }
+    .pos-left .qty { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .pos-right { text-align: right; }
+    .pos-right .value { font-size: 15px; font-weight: 600; }
+    .pos-right .pnl { font-size: 12px; margin-top: 2px; }
+
+    /* ── Trade list ── */
+    .trade-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 11px 0; border-bottom: 1px solid var(--border);
+    }
+    .trade-row:last-child { border-bottom: none; }
+    .trade-left .symbol { font-size: 14px; font-weight: 600; }
+    .trade-left .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .trade-right .pnl { font-size: 14px; font-weight: 600; }
+    .trade-right .date { font-size: 11px; color: var(--muted); margin-top: 2px; text-align: right; }
+
+    /* ── Signal list ── */
+    .signal-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .signal-row:last-child { border-bottom: none; }
+    .signal-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .signal-symbol { font-size: 15px; font-weight: 600; }
+    .signal-badge {
+      font-size: 11px; font-weight: 700; padding: 3px 8px;
+      border-radius: 6px; letter-spacing: 0.5px;
+    }
+    .badge-buy { background: rgba(52,199,89,0.15); color: var(--green); }
+    .badge-sell { background: rgba(255,47,0,0.15); color: var(--red); }
+    .badge-hold { background: rgba(136,136,136,0.15); color: var(--muted); }
+    .confidence-bar { background: var(--bg3); border-radius: 4px; height: 4px; overflow: hidden; }
+    .confidence-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+    .signal-reason { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+    /* ── Health ── */
+    .broker-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 11px 0; border-bottom: 1px solid var(--border);
+    }
+    .broker-row:last-child { border-bottom: none; }
+    .broker-name { font-size: 14px; font-weight: 600; }
+    .broker-mode { font-size: 11px; color: var(--muted); }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot-orange { background: var(--orange); }
+    .dot-red { background: var(--red); }
+
+    .notif-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .notif-row:last-child { border-bottom: none; }
+    .notif-top { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+    .notif-title { font-size: 13px; font-weight: 600; }
+
+    /* ── Loading / empty ── */
+    .loading { text-align: center; padding: 40px; color: var(--muted); font-size: 14px; }
+    .empty { text-align: center; padding: 32px; color: var(--muted); font-size: 13px; }
+    .spinner { animation: spin 1s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- ── Login ── -->
+<div id="login-screen">
+  <div style="font-size:52px">📈</div>
+  <h1>Alpha Trader</h1>
+  <p>Log ind for at se din platform</p>
+  <div class="input-group">
+    <input id="username" type="text" placeholder="Brugernavn" autocomplete="username" autocapitalize="none">
+    <input id="password" type="password" placeholder="Adgangskode" autocomplete="current-password">
+    <button class="btn" id="login-btn" onclick="doLogin()">Log ind</button>
+    <div class="error-msg" id="login-error"></div>
+  </div>
+</div>
+
+<!-- ── App ── -->
+<div id="app">
+  <header>
+    <h1>📈 Alpha Trader</h1>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span id="last-updated"></span>
+      <button id="refresh-btn" onclick="refreshAll()" title="Opdater">↻</button>
+    </div>
+  </header>
+
+  <div id="content">
+    <!-- Hjem -->
+    <div class="screen active" id="screen-home">
+      <div class="stat-grid">
+        <div class="stat">
+          <div class="stat-label">Total Equity</div>
+          <div class="stat-value blue" id="h-equity">—</div>
+          <div class="stat-sub" id="h-equity-sub"></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Daglig P&L</div>
+          <div class="stat-value" id="h-daily-pnl">—</div>
+          <div class="stat-sub" id="h-daily-pnl-pct"></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Åbne positioner</div>
+          <div class="stat-value" id="h-positions">—</div>
+          <div class="stat-sub" id="h-cash">cash: —</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Win Rate</div>
+          <div class="stat-value" id="h-winrate">—</div>
+          <div class="stat-sub" id="h-sharpe"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Equity kurve (30 dage)</div>
+        <canvas id="equity-chart"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Risiko</div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0">
+          <span style="font-size:13px;color:var(--muted)">Drawdown (nu)</span>
+          <span id="h-drawdown" style="font-size:13px;font-weight:600">—</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0">
+          <span style="font-size:13px;color:var(--muted)">Max Drawdown</span>
+          <span id="h-maxdrawdown" style="font-size:13px;font-weight:600">—</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0">
+          <span style="font-size:13px;color:var(--muted)">Profit Factor</span>
+          <span id="h-pf" style="font-size:13px;font-weight:600">—</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0">
+          <span style="font-size:13px;color:var(--muted)">Realiseret P&L</span>
+          <span id="h-realized" style="font-size:13px;font-weight:600">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Positioner -->
+    <div class="screen" id="screen-positions">
+      <div class="card">
+        <div class="card-title">Åbne positioner</div>
+        <div id="positions-list"><div class="loading"><span class="spinner">⟳</span> Henter...</div></div>
+      </div>
+    </div>
+
+    <!-- Handler -->
+    <div class="screen" id="screen-trades">
+      <div class="card">
+        <div class="card-title">Seneste handler</div>
+        <div id="trades-list"><div class="loading"><span class="spinner">⟳</span> Henter...</div></div>
+      </div>
+    </div>
+
+    <!-- Signaler -->
+    <div class="screen" id="screen-signals">
+      <div class="card">
+        <div class="card-title">Aktive signaler</div>
+        <div id="signals-list"><div class="loading"><span class="spinner">⟳</span> Henter...</div></div>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div class="screen" id="screen-status">
+      <div class="card">
+        <div class="card-title">Platform status</div>
+        <div id="health-info"><div class="loading"><span class="spinner">⟳</span> Henter...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Seneste notifikationer</div>
+        <div id="notif-list"><div class="loading"><span class="spinner">⟳</span> Henter...</div></div>
+      </div>
+    </div>
+  </div>
+
+  <nav>
+    <button class="tab active" data-tab="home" onclick="switchTab('home')">
+      <span class="icon">🏠</span><span>Hjem</span>
+    </button>
+    <button class="tab" data-tab="positions" onclick="switchTab('positions')">
+      <span class="icon">💼</span><span>Positioner</span>
+    </button>
+    <button class="tab" data-tab="trades" onclick="switchTab('trades')">
+      <span class="icon">📋</span><span>Handler</span>
+    </button>
+    <button class="tab" data-tab="signals" onclick="switchTab('signals')">
+      <span class="icon">⚡</span><span>Signaler</span>
+    </button>
+    <button class="tab" data-tab="status" onclick="switchTab('status')">
+      <span class="icon">🔌</span><span>Status</span>
+    </button>
+  </nav>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────
+let TOKEN = localStorage.getItem('at_token') || '';
+let currentTab = 'home';
+const BASE = window.location.origin;
+let refreshTimer = null;
+
+// ── API ───────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(BASE + path, {
+    ...opts,
+    headers: { ...opts.headers, 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }
+  });
+  if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+  return res.json();
+}
+
+// ── Auth ──────────────────────────────────────────────────────
+async function doLogin() {
+  const btn = document.getElementById('login-btn');
+  const err = document.getElementById('login-error');
+  const u = document.getElementById('username').value.trim();
+  const p = document.getElementById('password').value;
+  if (!u || !p) { err.textContent = 'Udfyld begge felter'; return; }
+  btn.textContent = '...';
+  err.textContent = '';
+  try {
+    const data = await fetch(BASE + '/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    }).then(r => r.json());
+    if (data.access_token) {
+      TOKEN = data.access_token;
+      localStorage.setItem('at_token', TOKEN);
+      showApp();
+    } else {
+      err.textContent = data.detail || 'Login fejlede';
+    }
+  } catch (e) {
+    err.textContent = 'Kan ikke nå serveren';
+  }
+  btn.textContent = 'Log ind';
+}
+
+function logout() {
+  TOKEN = ''; localStorage.removeItem('at_token');
+  document.getElementById('app').classList.remove('visible');
+  document.getElementById('login-screen').style.display = 'flex';
+  clearInterval(refreshTimer);
+}
+
+// ── Enter on password ──────────────────────────────────────────
+document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+document.getElementById('username').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('password').focus(); });
+
+// ── App ───────────────────────────────────────────────────────
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').classList.add('visible');
+  refreshAll();
+  refreshTimer = setInterval(refreshAll, 30000);
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.screen').forEach(s => s.classList.toggle('active', s.id === 'screen-' + tab));
+}
+
+async function refreshAll() {
+  const now = new Date();
+  document.getElementById('last-updated').textContent = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+  const rbtn = document.getElementById('refresh-btn');
+  rbtn.style.animation = 'spin 0.6s linear';
+  setTimeout(() => rbtn.style.animation = '', 700);
+  await Promise.allSettled([loadHome(), loadPositions(), loadTrades(), loadSignals(), loadStatus()]);
+}
+
+// ── Formatters ────────────────────────────────────────────────
+function fmtDKK(v) {
+  if (v == null || isNaN(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1e6) return (v/1e6).toFixed(2) + 'M kr';
+  if (abs >= 1e3) return (v/1e3).toFixed(1) + 'k kr';
+  return v.toFixed(0) + ' kr';
+}
+function fmtPct(v) { if (v == null) return '—'; return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'; }
+function colorClass(v) { return v > 0 ? 'green' : v < 0 ? 'red' : 'muted'; }
+function fmtDate(s) { if (!s) return ''; try { return new Date(s).toLocaleDateString('da-DK', {day:'2-digit',month:'short'}); } catch { return s.slice(0,10); } }
+
+// ── Home ──────────────────────────────────────────────────────
+async function loadHome() {
+  try {
+    const d = await api('/api/portfolio/summary');
+    const eq = d.total_equity || 0;
+    document.getElementById('h-equity').textContent = fmtDKK(eq);
+    document.getElementById('h-equity-sub').textContent = fmtPct(d.total_return_pct * 100);
+    document.getElementById('h-equity-sub').className = 'stat-sub ' + colorClass(d.total_return_pct);
+
+    const dp = d.daily_pnl || 0;
+    document.getElementById('h-daily-pnl').textContent = fmtDKK(dp);
+    document.getElementById('h-daily-pnl').className = 'stat-value ' + colorClass(dp);
+    document.getElementById('h-daily-pnl-pct').textContent = fmtPct((d.daily_pnl_pct || 0) * 100);
+    document.getElementById('h-daily-pnl-pct').className = 'stat-sub ' + colorClass(dp);
+
+    document.getElementById('h-positions').textContent = d.positions || 0;
+    document.getElementById('h-cash').textContent = 'cash: ' + fmtDKK(d.cash);
+
+    const wr = d.win_rate || 0;
+    document.getElementById('h-winrate').textContent = (wr * 100).toFixed(0) + '%';
+    document.getElementById('h-winrate').className = 'stat-value ' + (wr >= 0.5 ? 'green' : 'orange');
+    document.getElementById('h-sharpe').textContent = 'Sharpe: ' + (d.sharpe_ratio || 0).toFixed(2);
+
+    const dd = (d.current_drawdown_pct || 0) * 100;
+    document.getElementById('h-drawdown').textContent = fmtPct(-Math.abs(dd));
+    document.getElementById('h-drawdown').className = Math.abs(dd) > 5 ? 'red' : Math.abs(dd) > 2 ? 'orange' : 'green';
+    document.getElementById('h-maxdrawdown').textContent = fmtPct(-Math.abs((d.max_drawdown_pct || 0) * 100));
+    document.getElementById('h-pf').textContent = (d.profit_factor || 0).toFixed(2);
+    document.getElementById('h-pf').className = (d.profit_factor || 0) >= 1 ? 'green' : 'red';
+    document.getElementById('h-realized').textContent = fmtDKK(d.realized_pnl || 0);
+    document.getElementById('h-realized').className = colorClass(d.realized_pnl || 0);
+
+    loadEquityChart();
+  } catch(e) { console.warn('home error', e); }
+}
+
+async function loadEquityChart() {
+  try {
+    const data = await api('/api/portfolio/equity?days=30');
+    if (!data || data.length < 2) return;
+    const canvas = document.getElementById('equity-chart');
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.offsetWidth; const H = canvas.offsetHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.scale(dpr, dpr);
+
+    const vals = data.map(d => d.equity);
+    const min = Math.min(...vals) * 0.999;
+    const max = Math.max(...vals) * 1.001;
+    const range = max - min || 1;
+    const pts = vals.map((v, i) => [i / (vals.length - 1) * W, H - ((v - min) / range) * H * 0.9 - H * 0.05]);
+
+    // gradient fill
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(0,119,253,0.3)');
+    grad.addColorStop(1, 'rgba(0,119,253,0)');
+    ctx.beginPath();
+    pts.forEach(([x,y], i) => i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+
+    // line
+    ctx.beginPath();
+    pts.forEach(([x,y], i) => i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+    ctx.strokeStyle = '#0077FD'; ctx.lineWidth = 2; ctx.stroke();
+  } catch(e) {}
+}
+
+// ── Positions ─────────────────────────────────────────────────
+async function loadPositions() {
+  const el = document.getElementById('positions-list');
+  try {
+    const data = await api('/api/portfolio/positions');
+    if (!data.length) { el.innerHTML = '<div class="empty">Ingen åbne positioner</div>'; return; }
+    el.innerHTML = data.map(p => `
+      <div class="position-row">
+        <div class="pos-left">
+          <div class="symbol">${p.symbol}</div>
+          <div class="qty">${p.qty} stk · ${fmtDKK(p.entry_price)}</div>
+        </div>
+        <div class="pos-right">
+          <div class="value">${fmtDKK(p.market_value)}</div>
+          <div class="pnl ${colorClass(p.unrealized_pnl)}">${fmtDKK(p.unrealized_pnl)} (${fmtPct(p.unrealized_pnl_pct)})</div>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<div class="empty">Fejl ved hentning</div>'; }
+}
+
+// ── Trades ────────────────────────────────────────────────────
+async function loadTrades() {
+  const el = document.getElementById('trades-list');
+  try {
+    const data = await api('/api/portfolio/trades?limit=30');
+    if (!data.length) { el.innerHTML = '<div class="empty">Ingen lukkede handler endnu</div>'; return; }
+    el.innerHTML = data.map(t => {
+      const pnl = t.realized_pnl || ((t.exit_price - t.entry_price) * t.qty);
+      const pnlPct = t.entry_price ? (t.exit_price - t.entry_price) / t.entry_price * 100 : 0;
+      const reason = { stop_loss:'Stop Loss', take_profit:'Take Profit', trailing_stop:'Trailing Stop', signal:'Signal', manual:'Manuel' }[t.exit_reason] || t.exit_reason || '';
+      return `<div class="trade-row">
+        <div class="trade-left">
+          <div class="symbol">${t.symbol} <span style="font-size:10px;color:var(--muted)">${reason}</span></div>
+          <div class="meta">${t.qty} stk · ${fmtDKK(t.entry_price)} → ${fmtDKK(t.exit_price)}</div>
+        </div>
+        <div class="trade-right">
+          <div class="pnl ${colorClass(pnl)}">${fmtDKK(pnl)}</div>
+          <div class="date">${fmtDate(t.exit_time)} ${fmtPct(pnlPct)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div class="empty">Fejl ved hentning</div>'; }
+}
+
+// ── Signals ───────────────────────────────────────────────────
+async function loadSignals() {
+  const el = document.getElementById('signals-list');
+  try {
+    const data = await api('/api/signals?limit=20');
+    if (!data.length) { el.innerHTML = '<div class="empty">Ingen signaler endnu</div>'; return; }
+    el.innerHTML = data.map(s => {
+      const sig = (s.signal || s.action || '').toUpperCase();
+      const conf = parseFloat(s.confidence || 0);
+      const badgeCls = sig === 'BUY' ? 'badge-buy' : sig === 'SELL' ? 'badge-sell' : 'badge-hold';
+      const fillColor = sig === 'BUY' ? '#34C759' : sig === 'SELL' ? '#FF2F00' : '#888';
+      return `<div class="signal-row">
+        <div class="signal-top">
+          <span class="signal-symbol">${s.symbol || '—'}</span>
+          <span class="signal-badge ${badgeCls}">${sig}</span>
+        </div>
+        <div class="confidence-bar"><div class="confidence-fill" style="width:${conf}%;background:${fillColor}"></div></div>
+        <div class="signal-reason">${s.reason || s.strategy || ''} ${conf > 0 ? `· ${conf.toFixed(0)}% confidence` : ''}</div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div class="empty">Ingen signaler tilgængelige</div>'; }
+}
+
+// ── Status ────────────────────────────────────────────────────
+async function loadStatus() {
+  const hEl = document.getElementById('health-info');
+  const nEl = document.getElementById('notif-list');
+  try {
+    const h = await api('/api/health');
+    hEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:14px">Platform</span>
+        <span style="color:var(--green);font-size:13px;font-weight:600">● Kører (${h.uptime || '—'})</span>
+      </div>
+      ${(h.brokers || []).map(b => `
+        <div class="broker-row">
+          <div><div class="broker-name">${b.name}</div><div class="broker-mode">${b.mode}</div></div>
+          <span class="status-dot ${b.status === 'connected' ? 'dot-green' : 'dot-orange'}"></span>
+        </div>`).join('')}`;
+  } catch(e) { hEl.innerHTML = '<div class="empty">Kan ikke hente status</div>'; }
+
+  try {
+    const notifs = await api('/api/notifications?limit=15');
+    if (!notifs.length) { nEl.innerHTML = '<div class="empty">Ingen notifikationer</div>'; return; }
+    const sevColor = { CRITICAL: 'red', WARNING: 'orange', INFO: 'blue' };
+    nEl.innerHTML = notifs.map(n => `
+      <div class="notif-row">
+        <div class="notif-top">
+          <span class="${sevColor[n.severity] || 'muted'}">${n.severity}</span>
+          <span>${fmtDate(n.timestamp)}</span>
+        </div>
+        <div class="notif-title">${n.title}</div>
+      </div>`).join('');
+  } catch(e) { nEl.innerHTML = '<div class="empty">Ingen notifikationer</div>'; }
+}
+
+// ── Boot ──────────────────────────────────────────────────────
+if (TOKEN) {
+  // Verify token still valid
+  fetch(BASE + '/api/health', { headers: { 'Authorization': 'Bearer ' + TOKEN } })
+    .then(r => { if (r.ok) showApp(); else logout(); })
+    .catch(() => logout());
+}
+</script>
+</body>
+</html>
