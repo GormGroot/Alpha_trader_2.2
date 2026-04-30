@@ -12,10 +12,25 @@ Fuldautomatisk trading-platform i Python 3.14. Multi-broker, multi-strategi, 24/
 - **HC** — Ole's far, del af trading-teamet
 
 ## Platform Status (april 2026)
-- **Tests:** 1658/1658 grønne
+- **Tests:** 1737+ grønne (1720 + 17 nye sikkerhedstests)
 - **Broker:** Alpaca paper trading aktiv ($100k paper, ACTIVE)
 - **API keys:** `.env` (ikke i git)
 - **Fase:** Fase 2 af live-trading-plan gennemført ✅
+- **Mobile API:** http://localhost:8051 (PWA + REST + 2FA)
+- **Dashboard:** http://localhost:8050 (Dash, separat HTTP Basic auth)
+
+### Sikkerhed (login)
+- **Lag 1:** Username + password (konstant-tids sammenligning, bcrypt-kompatibel)
+- **Lag 2:** Telegram 2FA (6-cifret kode, 5 min levetid, max 3 forsøg, 30s rate-limit)
+- **Lag 3:** JWT-token (30 min auto-logout, justerbar via `APP_TOKEN_TTL_MINUTES`)
+- **Lag 4:** Geo-lock (kun DK, bypass-kode for rejser, fail-open ved netværksfejl)
+- **Lag 5:** Telegram-notifikationer ved login/blokering/2FA-fejl
+
+### Konfiguration (.env)
+- `APP_USERNAME`, `APP_PASSWORD`, `APP_SECRET_KEY` — basis auth
+- `APP_TOKEN_TTL_MINUTES=30` — auto-logout (15-1440 min)
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — 2FA + notifikationer
+- `GEO_LOCK_ENABLED=true`, `GEO_LOCK_COUNTRIES=DK`, `GEO_LOCK_BYPASS=...` — geo-lock
 
 ## Arkitektur
 ```

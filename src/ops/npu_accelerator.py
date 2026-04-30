@@ -199,17 +199,31 @@ class NPUSentimentAnalyzer:
     MODEL_PATH = "data_cache/npu_models/finbert_sentiment.rknn"
     MAX_LENGTH = 128  # Token limit for NPU inference
 
+    _instance = None
+
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        """Singleton — undgå at oprette 328 instanser (én per symbol)."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self, model_dir: str = "data_cache/npu_models"):
+        if self._initialized:
+            return
         self._model_dir = Path(model_dir)
         self._model_dir.mkdir(parents=True, exist_ok=True)
         self._rknn_model: RKNNModel | None = None
         self._tokenizer = None
         self._cpu_analyzer = None
         self._use_npu = False
-        self._initialized = False
 
     def initialize(self) -> bool:
         """Initialize NPU model or fall back to CPU."""
+        if self._initialized:
+            return True
         model_path = self._model_dir / "finbert_sentiment.rknn"
 
         # Try NPU first

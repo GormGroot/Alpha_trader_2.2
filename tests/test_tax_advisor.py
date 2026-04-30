@@ -457,6 +457,19 @@ class TestTaxAlert:
 
 
 class TestNotifier:
+    @pytest.fixture(autouse=True)
+    def _no_telegram(self, monkeypatch):
+        """
+        Isolér Notifier-tests fra Telegram-env-vars.
+
+        Notifier auto-tilføjer en TelegramChannel hvis TELEGRAM_BOT_TOKEN
+        og TELEGRAM_CHAT_ID er sat i miljøet. Det forstyrrer count-tests
+        der antager kun LogChannel som baseline.
+        """
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        yield
+
     def _make(self) -> Notifier:
         tmpdir = tempfile.mkdtemp()
         return Notifier(cache_dir=tmpdir)

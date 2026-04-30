@@ -15,6 +15,7 @@ _START_TIME = datetime.utcnow()
 
 
 @router.get("")
+@router.get("/")
 async def get_health(_: str = Depends(get_current_user)):
     """Platform health and broker status."""
     uptime_seconds = int((datetime.utcnow() - _START_TIME).total_seconds())

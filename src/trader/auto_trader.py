@@ -22,7 +22,9 @@ from __future__ import annotations
 import gc
 import os
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,12 +48,17 @@ CET = ZoneInfo("Europe/Copenhagen")
 
 
 def _now_cet() -> datetime:
-    """Get CET time from web-synced time service, fallback to local clock."""
+    """Get CET time from web-synced time service, fallback to local clock.
+
+    Fallback MUST NOT recurse — if the import or call fails, return local
+    wall-clock time in Europe/Copenhagen. A recursive call here caused stack
+    overflow when time_service was unavailable (fixed 2026-04-17).
+    """
     try:
         from src.ops.time_service import now_cet
         return now_cet()
     except Exception:
-        return _now_cet()
+        return datetime.now(CET)
 
 
 @dataclass
@@ -134,7 +141,9 @@ class AutoTrader:
         self._aggressive_mode    = True
         self._use_pattern_strategy = False   # Toggled via dashboard settings
         self._crypto_trading_enabled = True  # Toggled via dashboard settings
-        self.max_dkk_per_symbol  = 5000.0    # Max DKK to invest per symbol
+        # Max DKK per symbol. Safe default 50_000 matches CLAUDE.md spec.
+        # Overridden by config/risk_sizing.json at end of __init__.
+        self.max_dkk_per_symbol  = 50_000.0
         self._advanced_feedback_enabled = False  # Report recommendations → auto-apply
         self._weekend_mode = False                # Weekend crypto rotation active
         self._pre_weekend_settings: dict | None = None  # Saved settings before weekend mode
@@ -238,7 +247,10 @@ class AutoTrader:
         except Exception as e:
             logger.warning(f"[auto] ContinuousLearner ikke tilgaengelig: {e}")
 
-        # Load persisted position sizing overrides
+        # Load persisted position sizing overrides.
+        # If the config file is missing or malformed we keep the hardcoded
+        # safe defaults and log a WARNING — silent fallback hid a real
+        # 5k-vs-100k mismatch for months (fixed 2026-04-17).
         try:
             import json as _json
             _rs_path = Path(__file__).resolve().parent.parent.parent / "config" / "risk_sizing.json"
@@ -246,15 +258,25 @@ class AutoTrader:
                 _rs = _json.loads(_rs_path.read_text())
                 if "max_position_pct" in _rs:
                     _val = _rs["max_position_pct"]
-                    # Auto-detect: >1 = procent (15 = 15%), <=1 = decimal (0.15 = 15%)
                     position_size_pct = _val / 100.0 if _val > 1 else _val
                     self.position_size_pct = position_size_pct
                     logger.info(f"[auto] Loaded position_size_pct override: {position_size_pct:.1%}")
                 if "max_dkk_per_symbol" in _rs:
                     self.max_dkk_per_symbol = float(_rs["max_dkk_per_symbol"])
                     logger.info(f"[auto] Loaded max_dkk_per_symbol override: {self.max_dkk_per_symbol:,.0f} DKK")
-        except Exception:
-            pass
+            else:
+                logger.warning(
+                    f"[auto] config/risk_sizing.json not found — using safe defaults "
+                    f"(position_size_pct={self.position_size_pct:.1%}, "
+                    f"max_dkk_per_symbol={self.max_dkk_per_symbol:,.0f}). "
+                    f"Live trading should NOT start without an explicit config."
+                )
+        except Exception as e:
+            logger.error(
+                f"[auto] config/risk_sizing.json malformed ({e}) — using safe defaults. "
+                f"Live trading should NOT start until this is fixed.",
+                exc_info=True,
+            )
 
         # Adaptive thresholds (adjusted by feedback loop)
         # NB: _base_position_size_pct sættes FØR config-override for korrekt feedback-loop
@@ -276,6 +298,17 @@ class AutoTrader:
 
         self._total_scans  = 0
         self._total_trades = 0
+
+        # ── Concurrency guards (fixed 2026-04-17) ──────────
+        # Serialise scan_and_trade so dashboard-triggered scans and scheduler
+        # ticks cannot interleave position-sync with order execution.
+        self._scan_lock = threading.RLock()
+        # Per-symbol in-flight set: a symbol in here has an active order being
+        # placed. Prevents duplicate entries and duplicate exits.
+        self._in_flight: set[str] = set()
+        self._in_flight_lock = threading.Lock()
+        # Tracks last exit time per symbol to make _check_exits idempotent.
+        self._last_exit: dict[str, datetime] = {}
 
         mode = "PAPER" if paper else "⚠️  LIVE"
         logger.info(
@@ -349,77 +382,101 @@ class AutoTrader:
         import json as _json
 
         if enabled and not self._weekend_mode:
-            # ── Save current settings ─────────────────────
-            self._pre_weekend_settings = {
+            # ── Save current settings (snapshot BEFORE any mutation) ──
+            snapshot = {
                 "position_size_pct": self.position_size_pct,
                 "max_dkk_per_symbol": self.max_dkk_per_symbol,
                 "cooldown_minutes": self.cooldown_minutes,
                 "min_confidence": self.min_confidence,
             }
-            # Also save risk manager settings if available
             rm = getattr(self, "_risk_manager", None)
             if rm:
-                self._pre_weekend_settings["stop_loss_pct"] = getattr(rm, "stop_loss_pct", 0.05)
-                self._pre_weekend_settings["take_profit_pct"] = getattr(rm, "take_profit_pct", 0.10)
-                self._pre_weekend_settings["trailing_stop_pct"] = getattr(rm, "trailing_stop_pct", 0.03)
+                snapshot["stop_loss_pct"] = getattr(rm, "stop_loss_pct", 0.05)
+                snapshot["take_profit_pct"] = getattr(rm, "take_profit_pct", 0.10)
+                snapshot["trailing_stop_pct"] = getattr(rm, "trailing_stop_pct", 0.03)
 
-            # ── Close non-crypto positions ────────────────
-            positions = []
-            if hasattr(self, "_portfolio") and self._portfolio is not None and hasattr(self._portfolio, "positions"):
-                positions = list(self._portfolio.positions.keys())
+            # Install snapshot BEFORE mutating state so that a rollback can
+            # happen even if an exception hits mid-way.
+            self._pre_weekend_settings = snapshot
 
             closed_count = 0
-            for sym in positions:
-                is_crypto = sym.endswith("-USD")
-                is_future = "=F" in sym
-                if is_crypto:
-                    continue
-                if is_future and not close_futures:
-                    continue
-                if not is_future and not close_stocks:
-                    continue
-                try:
-                    pos = self._portfolio.positions[sym]
-                    self._portfolio.close_position(
-                        symbol=sym,
-                        price=pos.current_price or pos.entry_price,
-                        reason="weekend_rotation",
+            weekend_applied = False
+            try:
+                # ── Close non-crypto positions ────────────────
+                positions = []
+                if hasattr(self, "_portfolio") and self._portfolio is not None and hasattr(self._portfolio, "positions"):
+                    positions = list(self._portfolio.positions.keys())
+
+                for sym in positions:
+                    is_crypto = sym.endswith("-USD")
+                    is_future = "=F" in sym
+                    if is_crypto:
+                        continue
+                    if is_future and not close_futures:
+                        continue
+                    if not is_future and not close_stocks:
+                        continue
+                    try:
+                        pos = self._portfolio.positions[sym]
+                        self._portfolio.close_position(
+                            symbol=sym,
+                            price=pos.current_price or pos.entry_price,
+                            reason="weekend_rotation",
+                        )
+                        closed_count += 1
+                    except Exception as e:
+                        logger.warning(f"[auto] Weekend rotation — could not close {sym}: {e}")
+
+                # ── Apply weekend crypto parameters ───────────
+                target_pct = crypto_alloc_pct / 100.0
+                n_positions = max(1, min(4, int(target_pct / 0.05)))
+                per_position_pct = target_pct / n_positions
+                self.position_size_pct = per_position_pct
+                self.max_dkk_per_symbol = max(self.max_dkk_per_symbol, 15000.0)
+                self.cooldown_minutes = 30
+                self.min_confidence = max(self.min_confidence, 55.0)
+
+                if rm:
+                    rm.stop_loss_pct = 0.015
+                    rm.take_profit_pct = 0.025
+                    rm.trailing_stop_pct = 0.012
+
+                drm = getattr(self, "_dynamic_risk", None)
+                if drm and hasattr(drm, "_current_params"):
+                    snapshot["max_exposure_pct"] = drm._current_params.get(
+                        "max_exposure_pct", 0.95
                     )
-                    closed_count += 1
-                except Exception as e:
-                    logger.warning(f"[auto] Weekend rotation — could not close {sym}: {e}")
+                    drm._current_params["max_exposure_pct"] = target_pct
+                    logger.info(f"[auto] Weekend max_exposure capped at {target_pct:.0%}")
 
-            # ── Apply weekend crypto parameters ───────────
-            target_pct = crypto_alloc_pct / 100.0
-            # Size each position so that 3-4 crypto positions fill the target
-            n_positions = max(1, min(4, int(target_pct / 0.05)))
-            per_position_pct = target_pct / n_positions
-            self.position_size_pct = per_position_pct
-            self.max_dkk_per_symbol = max(self.max_dkk_per_symbol, 15000.0)
-            self.cooldown_minutes = 30
-            self.min_confidence = max(self.min_confidence, 55.0)
-
-            if rm:
-                rm.stop_loss_pct = 0.015
-                rm.take_profit_pct = 0.025
-                rm.trailing_stop_pct = 0.012
-
-            # Cap total exposure at crypto_alloc_pct so the rest stays as cash
-            drm = getattr(self, "_dynamic_risk", None)
-            if drm and hasattr(drm, "_current_params"):
-                self._pre_weekend_settings["max_exposure_pct"] = drm._current_params.get(
-                    "max_exposure_pct", 0.95
+                weekend_applied = True
+                self._weekend_mode = True
+                logger.info(
+                    f"[auto] WEEKEND MODE ON — closed {closed_count} non-crypto positions, "
+                    f"crypto target={target_pct:.0%} ({n_positions} positions x {per_position_pct:.0%}), "
+                    f"remaining {1 - target_pct:.0%} stays as cash, "
+                    f"SL=1.5%, TP=2.5%, TS=1.2%"
                 )
-                drm._current_params["max_exposure_pct"] = target_pct
-                logger.info(f"[auto] Weekend max_exposure capped at {target_pct:.0%}")
-
-            self._weekend_mode = True
-            logger.info(
-                f"[auto] WEEKEND MODE ON — closed {closed_count} non-crypto positions, "
-                f"crypto target={target_pct:.0%} ({n_positions} positions x {per_position_pct:.0%}), "
-                f"remaining {1 - target_pct:.0%} stays as cash, "
-                f"SL=1.5%, TP=2.5%, TS=1.2%"
-            )
+            except Exception as e:
+                # Roll back any partial mutation so we don't leave the trader
+                # in a half-weekend state. Fixed 2026-04-17.
+                logger.error(
+                    f"[auto] Weekend mode activation FAILED mid-way ({e}) — "
+                    f"rolling back ({closed_count} positions already closed cannot "
+                    f"be reopened automatically)",
+                    exc_info=True,
+                )
+                if not weekend_applied:
+                    self.position_size_pct = snapshot["position_size_pct"]
+                    self.max_dkk_per_symbol = snapshot["max_dkk_per_symbol"]
+                    self.cooldown_minutes = snapshot["cooldown_minutes"]
+                    self.min_confidence = snapshot["min_confidence"]
+                    if rm:
+                        rm.stop_loss_pct = snapshot.get("stop_loss_pct", rm.stop_loss_pct)
+                        rm.take_profit_pct = snapshot.get("take_profit_pct", rm.take_profit_pct)
+                        rm.trailing_stop_pct = snapshot.get("trailing_stop_pct", rm.trailing_stop_pct)
+                    self._pre_weekend_settings = None
+                raise
 
         elif not enabled and self._weekend_mode:
             # ── Restore original settings ─────────────────
@@ -577,12 +634,42 @@ class AutoTrader:
 
     # ── Main scan loop ────────────────────────────────────
 
+    @contextmanager
+    def _claim_symbol(self, symbol: str):
+        """Context manager that marks a symbol as in-flight for the duration.
+
+        Prevents two concurrent orders for the same symbol (e.g. an exit
+        signal firing while an entry for the same symbol is mid-flight).
+        Yields True if the claim succeeded, False if the symbol was already
+        in flight. Releases the claim on exit.
+        """
+        claimed = False
+        with self._in_flight_lock:
+            if symbol not in self._in_flight:
+                self._in_flight.add(symbol)
+                claimed = True
+        try:
+            yield claimed
+        finally:
+            if claimed:
+                with self._in_flight_lock:
+                    self._in_flight.discard(symbol)
+
     def scan_and_trade(self) -> ScanResult:
         """
         Run one complete scan cycle.
         Only scans symbols for currently open markets.
         Applies market handoff adjustments from prior sessions.
+
+        Serialised via self._scan_lock so concurrent invocations (scheduler +
+        dashboard trigger) cannot interleave position-sync with execution.
         """
+        # Acquire scan-lock for the entire cycle. RLock so nested calls from
+        # same thread (e.g. via test helpers) still work.
+        with self._scan_lock:
+            return self._scan_and_trade_locked()
+
+    def _scan_and_trade_locked(self) -> ScanResult:
         t0  = time.time()
         now = _now_cet()
         self._total_scans += 1
@@ -985,7 +1072,24 @@ class AutoTrader:
                             trigger_price=prices.get(sym, pos.current_price),
                         ))
 
+            # Deduplicate within this batch AND apply last-exit cooldown
+            # (30s) so a retriggered scan cannot fire the same exit twice.
+            # Fixes exit-signal idempotency (2026-04-17).
+            seen_syms: set[str] = set()
+            now = _now_cet()
             for sig in exit_signals:
+                if sig.symbol in seen_syms:
+                    continue
+                last = self._last_exit.get(sig.symbol)
+                if last is not None and (now - last).total_seconds() < 30:
+                    logger.debug(
+                        f"[auto] Skip duplicate exit for {sig.symbol} "
+                        f"(last exit {(now - last).total_seconds():.1f}s ago)"
+                    )
+                    continue
+                if sig.symbol in self._in_flight:
+                    logger.debug(f"[auto] Skip exit for {sig.symbol}: already in flight")
+                    continue
                 qty = self._get_position_qty(sig.symbol)
                 if qty > 0:
                     action = TradeAction(
@@ -998,6 +1102,7 @@ class AutoTrader:
                         risk_message="Exit signal — auto-approved",
                     )
                     actions.append(action)
+                    seen_syms.add(sig.symbol)
                     logger.warning(f"[auto] EXIT: SELL {qty} {sig.symbol} — {sig.reason}")
         except Exception as e:
             logger.error(f"[auto] Exit check fejl: {e}")
@@ -1223,6 +1328,18 @@ class AutoTrader:
             logger.info(f"[auto] {action.side} {action.symbol}: AFVIST — {action.risk_message}")
             return
 
+        # Guard against duplicate concurrent orders for the same symbol.
+        with self._claim_symbol(action.symbol) as claimed:
+            if not claimed:
+                action.error = "duplicate_in_flight"
+                action.executed = False
+                logger.warning(
+                    f"[auto] Skip {action.side} {action.symbol}: order already in flight"
+                )
+                return
+            self._execute_action_locked(action)
+
+    def _execute_action_locked(self, action: TradeAction) -> None:
         try:
             if action.side == "BUY":
                 order = self.router.buy(symbol=action.symbol, qty=action.qty)
@@ -1253,6 +1370,9 @@ class AutoTrader:
             action.executed = True
             self._total_trades                 += 1
             self._last_trade[action.symbol]     = _now_cet()
+            # Record exit timestamp so the cooldown in _check_exits works.
+            if action.reason.startswith("EXIT"):
+                self._last_exit[action.symbol] = _now_cet()
 
             # Sync to risk manager portfolio (kun hvis RM har sin EGEN portfolio)
             # Hvis broker og RM deler portfolio-instans, er den allerede opdateret
@@ -1321,7 +1441,7 @@ class AutoTrader:
     def _prune_databases(self) -> None:
         """Prune old scan/trade/signal logs to prevent unbounded DB growth."""
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with self._db_connect() as conn:
                 # Keep last 7 days of scans, last 30 days of trades
                 conn.execute(
                     "DELETE FROM scans WHERE timestamp < datetime('now', '-7 days')"
@@ -1625,8 +1745,30 @@ class AutoTrader:
 
     # ── SQLite logging ────────────────────────────────────
 
+    def _db_connect(self) -> sqlite3.Connection:
+        """Tuned connection to auto_trader_log.db.
+
+        The dashboard reads scans/trades while the trader thread appends
+        to them — WAL + NORMAL gives the dashboard consistent reads
+        without blocking writers. busy_timeout absorbs the occasional
+        dashboard-side long query.
+
+        journal_mode=WAL is persistent (stored in the DB file header) and
+        is applied once in _init_db(). synchronous and busy_timeout are
+        per-connection settings and stay here.
+        """
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
+        conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+        conn.execute("PRAGMA busy_timeout=30000").fetchone()
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        # One-time WAL activation. PRAGMA journal_mode=WAL is persistent
+        # in the file header; running it on every _db_connect() caused
+        # lock contention between simultaneous connections.
+        with sqlite3.connect(self._db_path, timeout=30.0) as _setup:
+            _setup.execute("PRAGMA journal_mode=WAL").fetchone()
+        with self._db_connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS scans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1659,10 +1801,23 @@ class AutoTrader:
                     error TEXT
                 )
             """)
+            # Dashboard queries sort by timestamp DESC and filter by
+            # symbol; these indexes keep the scan-history page fast
+            # even at millions of rows.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scans_ts ON scans(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts "
+                "ON trades(symbol, timestamp)"
+            )
 
     def _log_scan(self, result: ScanResult) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with self._db_connect() as conn:
                 cursor = conn.execute(
                     """INSERT INTO scans
                        (timestamp, symbols_scanned, signals_generated,
@@ -1734,7 +1889,7 @@ class AutoTrader:
     def get_trade_history(self, days: int = 7) -> list[dict]:
         try:
             since = (datetime.now() - timedelta(days=days)).isoformat()
-            with sqlite3.connect(self._db_path) as conn:
+            with self._db_connect() as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT * FROM trades WHERE timestamp > ? ORDER BY timestamp DESC",
@@ -1746,7 +1901,7 @@ class AutoTrader:
 
     def get_scan_history(self, limit: int = 20) -> list[dict]:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            with self._db_connect() as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT * FROM scans ORDER BY timestamp DESC LIMIT ?",

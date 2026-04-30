@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Alpha Trader">
   <meta name="theme-color" content="#0f0f1a">
@@ -31,22 +32,79 @@
     /* ── Login ── */
     #login-screen {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      height: 100vh; padding: 32px; gap: 20px;
+      height: 100vh; padding: 32px; gap: 18px;
+      background: radial-gradient(ellipse at top, #1a2040 0%, var(--bg) 60%);
     }
-    #login-screen h1 { font-size: 28px; color: var(--blue); }
-    #login-screen p { color: var(--muted); font-size: 14px; }
-    .input-group { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+    .login-card {
+      width: 100%; max-width: 380px; background: rgba(22,33,62,0.7);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 20px;
+      padding: 36px 28px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column; gap: 16px;
+      animation: fadeIn 0.4s ease-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+    .login-logo {
+      width: 64px; height: 64px; margin: 0 auto;
+      background: linear-gradient(135deg, var(--blue) 0%, #00b8ff 100%);
+      border-radius: 18px; display: flex; align-items: center; justify-content: center;
+      font-size: 32px; box-shadow: 0 8px 24px rgba(0,119,253,0.4);
+    }
+    .login-title { font-size: 24px; font-weight: 700; text-align: center; letter-spacing: -0.3px; }
+    .login-subtitle { color: var(--muted); font-size: 13px; text-align: center; margin-top: -8px; }
+    .input-group { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+    .input-wrapper { position: relative; }
+    .input-wrapper .icon-prefix {
+      position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+      color: var(--muted); font-size: 16px; pointer-events: none;
+    }
     input {
-      width: 100%; padding: 14px 16px; background: var(--bg2); border: 1px solid var(--border);
-      border-radius: var(--radius); color: var(--text); font-size: 16px; outline: none;
+      width: 100%; padding: 14px 16px 14px 42px; background: rgba(15,15,26,0.6);
+      border: 1px solid var(--border); border-radius: var(--radius); color: var(--text);
+      font-size: 16px; outline: none; transition: all 0.15s;
     }
-    input:focus { border-color: var(--blue); }
+    input:focus { border-color: var(--blue); background: rgba(15,15,26,0.9); box-shadow: 0 0 0 3px rgba(0,119,253,0.15); }
+    input.code-input {
+      padding-left: 16px; text-align: center; letter-spacing: 8px;
+      font-size: 22px; font-weight: 600; font-family: ui-monospace, 'SF Mono', monospace;
+    }
     .btn {
       width: 100%; padding: 14px; background: var(--blue); color: #fff; border: none;
       border-radius: var(--radius); font-size: 16px; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; margin-top: 4px;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
     }
-    .btn:active { opacity: 0.8; }
-    .error-msg { color: var(--red); font-size: 13px; text-align: center; min-height: 18px; }
+    .btn:hover:not(:disabled) { background: #0066d8; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,119,253,0.3); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-link {
+      background: none; color: var(--blue); border: none; padding: 8px;
+      font-size: 13px; cursor: pointer; text-align: center;
+    }
+    .btn-link:disabled { color: var(--muted); cursor: not-allowed; }
+    .btn-link:hover:not(:disabled) { text-decoration: underline; }
+    .error-msg {
+      color: var(--red); font-size: 13px; text-align: center; min-height: 18px;
+      padding: 6px 0;
+    }
+    .error-msg.success { color: var(--green); }
+    .info-box {
+      background: rgba(0,119,253,0.08); border: 1px solid rgba(0,119,253,0.2);
+      border-radius: 10px; padding: 12px 14px; font-size: 13px; color: #b8d4ff;
+      display: flex; gap: 10px; align-items: flex-start;
+    }
+    .info-box .info-icon { font-size: 18px; line-height: 1; }
+    .spinner-inline {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .login-footer {
+      margin-top: 8px; font-size: 11px; color: var(--muted); text-align: center;
+    }
+    .login-footer a { color: var(--blue); text-decoration: none; }
+    .countdown { font-variant-numeric: tabular-nums; color: var(--blue); }
 
     /* ── App shell ── */
     #app { display: none; height: 100vh; flex-direction: column; }
@@ -177,14 +235,59 @@
 
 <!-- ── Login ── -->
 <div id="login-screen">
-  <div style="font-size:52px">📈</div>
-  <h1>Alpha Trader</h1>
-  <p>Log ind for at se din platform</p>
-  <div class="input-group">
-    <input id="username" type="text" placeholder="Brugernavn" autocomplete="username" autocapitalize="none">
-    <input id="password" type="password" placeholder="Adgangskode" autocomplete="current-password">
-    <button class="btn" id="login-btn" onclick="doLogin()">Log ind</button>
-    <div class="error-msg" id="login-error"></div>
+  <!-- Step 1: Username + Password -->
+  <div class="login-card" id="login-step-1">
+    <div class="login-logo">📈</div>
+    <div>
+      <div class="login-title">Alpha Trader</div>
+      <div class="login-subtitle">Log ind for at forvalte din portefølje</div>
+    </div>
+    <form class="input-group" id="login-form" onsubmit="event.preventDefault(); doLogin();">
+      <div class="input-wrapper">
+        <span class="icon-prefix">👤</span>
+        <input id="username" type="text" placeholder="Brugernavn" autocomplete="username" autocapitalize="none" autofocus>
+      </div>
+      <div class="input-wrapper">
+        <span class="icon-prefix">🔒</span>
+        <input id="password" type="password" placeholder="Adgangskode" autocomplete="current-password">
+      </div>
+      <button class="btn" id="login-btn" type="submit">
+        <span id="login-btn-text">Fortsæt</span>
+      </button>
+      <div class="error-msg" id="login-error"></div>
+    </form>
+    <div class="login-footer">
+      Sikker login med 2-faktor godkendelse via Telegram
+    </div>
+  </div>
+
+  <!-- Step 2: 2FA Code -->
+  <div class="login-card" id="login-step-2" style="display:none">
+    <div class="login-logo" style="background: linear-gradient(135deg, #34C759 0%, #00b8a3 100%); box-shadow: 0 8px 24px rgba(52,199,89,0.4);">📱</div>
+    <div>
+      <div class="login-title">Bekræft login</div>
+      <div class="login-subtitle">Indtast den 6-cifrede kode</div>
+    </div>
+    <div class="info-box">
+      <span class="info-icon">💬</span>
+      <div>Vi har sendt en kode til <strong id="code-destination">Telegram</strong>. Den udløber om <span class="countdown" id="code-countdown">5:00</span>.</div>
+    </div>
+    <form class="input-group" id="verify-form" onsubmit="event.preventDefault(); doVerify();">
+      <div class="input-wrapper">
+        <input id="code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+               class="code-input" placeholder="······" autocomplete="one-time-code">
+      </div>
+      <button class="btn" id="verify-btn" type="submit">
+        <span id="verify-btn-text">Bekræft</span>
+      </button>
+      <div class="error-msg" id="verify-error"></div>
+      <button type="button" class="btn-link" id="resend-btn" onclick="doResend()">
+        Send ny kode
+      </button>
+      <button type="button" class="btn-link" onclick="backToStep1()">
+        ← Tilbage til login
+      </button>
+    </form>
   </div>
 </div>
 
@@ -313,48 +416,257 @@ let currentTab = 'home';
 const BASE = window.location.origin;
 let refreshTimer = null;
 
+// ── Auto-logout (inaktivitet) ─────────────────────────────────
+const IDLE_LIMIT_MS = 30 * 60 * 1000; // 30 min
+const IDLE_WARN_MS  = 5  * 60 * 1000; // varsel 5 min før
+let idleTimer = null;
+let idleWarnTimer = null;
+let lastActivity = Date.now();
+
+function resetIdleTimer() {
+  lastActivity = Date.now();
+  if (idleTimer) clearTimeout(idleTimer);
+  if (idleWarnTimer) clearTimeout(idleWarnTimer);
+  if (!TOKEN) return;
+  // Varsel 5 min før logout
+  idleWarnTimer = setTimeout(showIdleWarning, IDLE_LIMIT_MS - IDLE_WARN_MS);
+  // Faktisk logout efter 30 min
+  idleTimer = setTimeout(() => {
+    logout('Logget ud pga. 30 minutters inaktivitet');
+  }, IDLE_LIMIT_MS);
+}
+
+function showIdleWarning() {
+  // Vis et lille toast — ikke blokerende
+  const t = document.createElement('div');
+  t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(255,159,10,0.95);color:#000;padding:14px 20px;border-radius:12px;font-weight:600;font-size:14px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,0.3);animation:fadeIn 0.3s';
+  t.textContent = '⚠️ Du logges ud om 5 minutter — bevæg musen for at forblive logget ind';
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 8000);
+}
+
+['mousemove','mousedown','keydown','touchstart','scroll','click'].forEach(evt => {
+  document.addEventListener(evt, () => {
+    // Throttle: kun reset hvis mindst 30 sek siden sidste reset
+    if (Date.now() - lastActivity > 30000) {
+      resetIdleTimer();
+    }
+  }, { passive: true });
+});
+
 // ── API ───────────────────────────────────────────────────────
 async function api(path, opts = {}) {
-  const res = await fetch(BASE + path, {
+  // Cache-buster: tilføj timestamp så Safari/iOS aldrig serverer cached responses
+  const sep = path.includes('?') ? '&' : '?';
+  const url = BASE + path + sep + '_=' + Date.now();
+  const res = await fetch(url, {
     ...opts,
+    cache: 'no-store',
     headers: { ...opts.headers, 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }
   });
-  if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+  if (res.status === 401) { logout('Sessionen er udløbet — log ind igen'); throw new Error('Unauthorized'); }
+  resetIdleTimer(); // brugeraktivitet
   return res.json();
 }
 
-// ── Auth ──────────────────────────────────────────────────────
+// ── Auth state ────────────────────────────────────────────────
+let LOGIN_TOKEN = '';
+let CACHED_USER = '';
+let CACHED_PASS = '';
+let countdownTimer = null;
+
+function setBtnLoading(btnId, textId, loading, normalText) {
+  const btn = document.getElementById(btnId);
+  const text = document.getElementById(textId);
+  if (loading) {
+    btn.disabled = true;
+    text.innerHTML = '<span class="spinner-inline"></span> Vent...';
+  } else {
+    btn.disabled = false;
+    text.textContent = normalText;
+  }
+}
+
+function showStep(step) {
+  document.getElementById('login-step-1').style.display = (step === 1) ? 'flex' : 'none';
+  document.getElementById('login-step-2').style.display = (step === 2) ? 'flex' : 'none';
+  if (step === 2) {
+    setTimeout(() => document.getElementById('code').focus(), 50);
+  }
+}
+
+function backToStep1() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  document.getElementById('code').value = '';
+  document.getElementById('verify-error').textContent = '';
+  showStep(1);
+  setTimeout(() => document.getElementById('username').focus(), 50);
+}
+
+function startCountdown(seconds) {
+  if (countdownTimer) clearInterval(countdownTimer);
+  const el = document.getElementById('code-countdown');
+  let remaining = seconds;
+  const tick = () => {
+    if (remaining <= 0) {
+      clearInterval(countdownTimer);
+      el.textContent = 'udløbet';
+      el.style.color = 'var(--red)';
+      document.getElementById('verify-error').textContent = 'Koden er udløbet — bed om en ny';
+      return;
+    }
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    el.textContent = `${m}:${String(s).padStart(2,'0')}`;
+    remaining--;
+  };
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+}
+
+// ── Auth: Step 1 (username + password) ────────────────────────
 async function doLogin() {
-  const btn = document.getElementById('login-btn');
   const err = document.getElementById('login-error');
   const u = document.getElementById('username').value.trim();
   const p = document.getElementById('password').value;
   if (!u || !p) { err.textContent = 'Udfyld begge felter'; return; }
-  btn.textContent = '...';
   err.textContent = '';
+  setBtnLoading('login-btn', 'login-btn-text', true);
   try {
-    const data = await fetch(BASE + '/api/auth/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const res = await fetch(BASE + '/api/auth/login?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ username: u, password: p })
-    }).then(r => r.json());
-    if (data.access_token) {
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      err.textContent = data.detail || 'Login fejlede';
+      setBtnLoading('login-btn', 'login-btn-text', false, 'Fortsæt');
+      return;
+    }
+
+    if (data.two_factor === false && data.access_token) {
+      // Ingen 2FA — direkte ind
       TOKEN = data.access_token;
       localStorage.setItem('at_token', TOKEN);
       showApp();
-    } else {
-      err.textContent = data.detail || 'Login fejlede';
+      return;
     }
+
+    // 2FA krævet
+    LOGIN_TOKEN = data.login_token;
+    CACHED_USER = u;
+    CACHED_PASS = p;
+    document.getElementById('code-destination').textContent = data.destination || 'Telegram';
+    showStep(2);
+    startCountdown(300);
+    setBtnLoading('login-btn', 'login-btn-text', false, 'Fortsæt');
   } catch (e) {
     err.textContent = 'Kan ikke nå serveren';
+    setBtnLoading('login-btn', 'login-btn-text', false, 'Fortsæt');
   }
-  btn.textContent = 'Log ind';
 }
 
-function logout() {
+// ── Auth: Step 2 (2FA code) ───────────────────────────────────
+async function doVerify() {
+  const err = document.getElementById('verify-error');
+  const code = document.getElementById('code').value.trim();
+  if (!/^\d{6}$/.test(code)) { err.textContent = 'Indtast 6 cifre'; return; }
+  err.textContent = '';
+  setBtnLoading('verify-btn', 'verify-btn-text', true);
+  try {
+    const res = await fetch(BASE + '/api/auth/verify?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ login_token: LOGIN_TOKEN, code: code })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      err.textContent = data.detail || 'Forkert kode';
+      setBtnLoading('verify-btn', 'verify-btn-text', false, 'Bekræft');
+      document.getElementById('code').select();
+      return;
+    }
+    TOKEN = data.access_token;
+    localStorage.setItem('at_token', TOKEN);
+    if (countdownTimer) clearInterval(countdownTimer);
+    CACHED_PASS = ''; // nulstil cache
+    showApp();
+  } catch (e) {
+    err.textContent = 'Kan ikke nå serveren';
+    setBtnLoading('verify-btn', 'verify-btn-text', false, 'Bekræft');
+  }
+}
+
+async function doResend() {
+  const btn = document.getElementById('resend-btn');
+  const err = document.getElementById('verify-error');
+  if (!CACHED_USER || !CACHED_PASS) {
+    backToStep1();
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Sender...';
+  err.textContent = '';
+  try {
+    const res = await fetch(BASE + '/api/auth/resend?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ username: CACHED_USER, password: CACHED_PASS })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      err.textContent = data.detail || 'Kunne ikke sende ny kode';
+      btn.disabled = false;
+      btn.textContent = 'Send ny kode';
+      return;
+    }
+    LOGIN_TOKEN = data.login_token;
+    document.getElementById('code').value = '';
+    err.textContent = '';
+    err.classList.add('success');
+    err.textContent = '✓ Ny kode sendt';
+    setTimeout(() => { err.textContent = ''; err.classList.remove('success'); }, 3000);
+    startCountdown(300);
+    btn.textContent = 'Send ny kode';
+    btn.disabled = false;
+  } catch (e) {
+    err.textContent = 'Kan ikke nå serveren';
+    btn.disabled = false;
+    btn.textContent = 'Send ny kode';
+  }
+}
+
+// Auto-submit når 6 cifre er indtastet
+document.addEventListener('DOMContentLoaded', () => {
+  const codeInput = document.getElementById('code');
+  if (codeInput) {
+    codeInput.addEventListener('input', (e) => {
+      // Filtrer til kun cifre
+      e.target.value = e.target.value.replace(/\D/g, '');
+      if (e.target.value.length === 6) {
+        doVerify();
+      }
+    });
+  }
+});
+
+function logout(reason) {
   TOKEN = ''; localStorage.removeItem('at_token');
+  LOGIN_TOKEN = ''; CACHED_USER = ''; CACHED_PASS = '';
+  if (countdownTimer) clearInterval(countdownTimer);
+  if (idleTimer) clearTimeout(idleTimer);
+  if (idleWarnTimer) clearTimeout(idleWarnTimer);
   document.getElementById('app').classList.remove('visible');
   document.getElementById('login-screen').style.display = 'flex';
+  showStep(1);
+  document.getElementById('password').value = '';
   clearInterval(refreshTimer);
+  if (reason) {
+    const err = document.getElementById('login-error');
+    if (err) { err.textContent = reason; }
+  }
 }
 
 // ── Enter on password ──────────────────────────────────────────
@@ -367,6 +679,7 @@ function showApp() {
   document.getElementById('app').classList.add('visible');
   refreshAll();
   refreshTimer = setInterval(refreshAll, 30000);
+  resetIdleTimer(); // start auto-logout countdown
 }
 
 function switchTab(tab) {

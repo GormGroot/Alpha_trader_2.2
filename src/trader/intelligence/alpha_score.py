@@ -236,13 +236,20 @@ class AlphaScoreEngine:
         breakdown["alternative"] = self._alternative_score(symbol)
         breakdown["seasonality"] = self._seasonality_score(symbol, df)
 
-        # Vægtet total
+        # Vægtet total — confidence-vægtet så default-50 scores med lav confidence tæller mindre
         total = 0.0
+        effective_weight_sum = 0.0
         for name, ss in breakdown.items():
             w = self._weights.get(name, 0.0)
             ss.weight = w
-            total += ss.score * w
+            effective_w = w * ss.confidence
+            total += ss.score * effective_w
+            effective_weight_sum += effective_w
 
+        if effective_weight_sum > 0:
+            total = total / effective_weight_sum
+        else:
+            total = 50.0
         total = max(0.0, min(100.0, total))
 
         # Confidence = vægtet gennemsnit af sub-confidence
@@ -387,8 +394,6 @@ class AlphaScoreEngine:
                 bb_pos = (close - bb_lower) / (bb_upper - bb_lower)
                 # Near lower band = oversold (contrarian bullish)
                 bb_score = 100 - bb_pos * 100  # 0 at top, 100 at bottom
-                # Moderate: near middle = 50
-                bb_score = 30 + bb_score * 0.4  # Compress to 30-70 range
                 scores.append(max(0, min(100, bb_score)))
                 details["bb_position"] = round(bb_pos, 2)
 

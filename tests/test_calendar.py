@@ -99,7 +99,7 @@ def _make_economic_event(
 def _make_price_df(n: int = 100, start_price: float = 100.0, seed: int = 42) -> pd.DataFrame:
     """Generér syntetisk prisdata."""
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
     returns = rng.normal(0.001, 0.02, n)
     prices = start_price * np.cumprod(1 + returns)
     return pd.DataFrame({

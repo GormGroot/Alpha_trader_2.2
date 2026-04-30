@@ -47,7 +47,7 @@ def _make_regime_result(regime: MarketRegime, confidence: float = 80, score: flo
 
 def _make_df(n=100, trend=0.001, noise=0.015, seed=42, start=100.0):
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
     returns = trend + rng.normal(0, noise, n)
     prices = start * np.cumprod(1 + returns)
     return pd.DataFrame({
@@ -62,7 +62,7 @@ def _make_df(n=100, trend=0.001, noise=0.015, seed=42, start=100.0):
 def _make_correlated_data(n=100, seed=42):
     """Generér 3 hoejt korrelerede + 1 ukorreleret aktie."""
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
     common = rng.normal(0.001, 0.015, n)
 
     return pd.DataFrame({
@@ -413,7 +413,7 @@ class TestPortfolioBeta:
         mon = CorrelationMonitor(min_data_points=10)
         rng = np.random.default_rng(42)
         n = 60
-        dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+        dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
         market_ret = rng.normal(0.001, 0.01, n)
         market = pd.DataFrame(
             {"Close": 100 * np.cumprod(1 + market_ret)},

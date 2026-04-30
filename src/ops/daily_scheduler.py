@@ -29,12 +29,14 @@ Features:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, date
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -42,6 +44,48 @@ from loguru import logger
 
 # ── Timezones ──────────────────────────────────────────────
 TZ_CET = ZoneInfo("Europe/Copenhagen")
+
+# ── Heartbeat ──────────────────────────────────────────────
+# The scheduler writes the current epoch seconds to this file on every
+# loop iteration (~30s cadence). A Docker HEALTHCHECK, systemd watchdog,
+# or external monitor reads it back and alerts if the file is missing
+# or stale (>3 min by default). The path is env-overridable so tests
+# and containers can point at their own tmpfs location.
+HEARTBEAT_FILE = Path(os.environ.get("ALPHA_TRADER_HEARTBEAT", "/tmp/alpha_trader_heartbeat"))
+HEARTBEAT_STALE_SECONDS = 180  # 3 min — covers one missed 30s tick + margin
+
+
+def _write_heartbeat(now: datetime | None = None) -> None:
+    """Persist a unix-epoch timestamp so an external watchdog can verify
+    the scheduler loop is alive. Best-effort — filesystem failures must
+    never crash the loop."""
+    try:
+        ts = (now or _now_cet()).timestamp()
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic-ish write via replace — avoids a torn read from the watchdog.
+        tmp = HEARTBEAT_FILE.with_suffix(HEARTBEAT_FILE.suffix + ".tmp")
+        tmp.write_text(f"{ts:.3f}\n")
+        tmp.replace(HEARTBEAT_FILE)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug(f"[scheduler] heartbeat write failed: {exc}")
+
+
+def is_scheduler_alive(
+    max_age_seconds: int = HEARTBEAT_STALE_SECONDS,
+    path: Path | str | None = None,
+) -> bool:
+    """True if the heartbeat file exists and is younger than max_age.
+    Used by Docker HEALTHCHECK and the dashboard watchdog widget."""
+    target = Path(path) if path is not None else HEARTBEAT_FILE
+    try:
+        if not target.exists():
+            return False
+        raw = target.read_text().strip()
+        last_ts = float(raw)
+        age = time.time() - last_ts
+        return age <= max_age_seconds
+    except Exception:
+        return False
 
 
 def _now_cet() -> datetime:
@@ -779,6 +823,96 @@ def _data_processor_retrain() -> dict:
         return {"error": str(e)}
 
 
+def _circuit_breaker_reset() -> dict:
+    """08:45 CET — Auto-reset daglige circuit breakers ved ny handelsdag."""
+    logger.info("[scheduler] Circuit breaker daily reset")
+    try:
+        from src.broker.registry import get_auto_trader
+        trader = get_auto_trader()
+        if trader is None:
+            return {"skipped": True, "reason": "no_auto_trader"}
+
+        rm = getattr(trader, '_risk_manager', None)
+        if rm and rm.is_trading_halted:
+            rm.resume_trading()
+            logger.info("[scheduler] RiskManager circuit breaker RESET — handel genoptaget")
+
+        drm = getattr(trader, '_dynamic_risk_manager', None)
+        if drm and hasattr(drm, 'resume_trading') and getattr(drm, 'is_trading_halted', False):
+            drm.resume_trading()
+            logger.info("[scheduler] DynamicRiskManager circuit breaker RESET")
+
+        return {"reset": True}
+    except Exception as e:
+        logger.warning(f"[scheduler] Circuit breaker reset failed: {e}")
+        return {"error": str(e)}
+
+
+def _db_maintenance() -> dict:
+    """03:00 CET Saturdays — prune + VACUUM hot SQLite DBs.
+
+    signals.db and learning.db grow by ~1 GB/day in production; without
+    this hook the DBs blow through disk and the dashboard queries slow
+    to a crawl. Runs Saturday only — low-traffic window so the file
+    locks held during VACUUM don't interfere with active scanning.
+    """
+    now = _now_cet()
+    if now.weekday() != 5:  # Saturday = 5
+        return {"skipped": True, "reason": "not_saturday"}
+
+    result: dict = {}
+    # signals.db — prune >90d, then VACUUM
+    try:
+        from pathlib import Path
+        from src.strategy.signal_engine import SignalStore
+
+        signals_path = Path("data_cache/signals.db")
+        if signals_path.exists():
+            store = SignalStore(signals_path)
+            before = store.count()
+            store.prune(keep_days=90)
+            after = store.count()
+            store.vacuum()
+            size_mb = signals_path.stat().st_size / 1024 / 1024
+            result["signals"] = {
+                "rows_pruned": before - after,
+                "rows_remaining": after,
+                "size_mb": round(size_mb, 1),
+            }
+            logger.info(
+                f"[scheduler] signals.db pruned: {before - after} rows removed, "
+                f"{after} remain, {size_mb:.1f} MB"
+            )
+    except Exception as e:
+        logger.warning(f"[scheduler] signals.db maintenance failed: {e}")
+        result["signals_error"] = str(e)
+
+    # learning.db — prune + VACUUM
+    try:
+        import sqlite3
+        from pathlib import Path
+        from src.learning.continuous_learner import ContinuousLearner
+
+        learning_path = Path("data_cache/learning.db")
+        if learning_path.exists():
+            learner = ContinuousLearner(db_path=str(learning_path))
+            learner._prune_learning_db()
+            # VACUUM must run on a fresh connection with no open tx
+            conn = sqlite3.connect(str(learning_path), timeout=60.0)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+            size_mb = learning_path.stat().st_size / 1024 / 1024
+            result["learning"] = {"size_mb": round(size_mb, 1)}
+            logger.info(f"[scheduler] learning.db pruned + vacuumed, {size_mb:.1f} MB")
+    except Exception as e:
+        logger.warning(f"[scheduler] learning.db maintenance failed: {e}")
+        result["learning_error"] = str(e)
+
+    return result
+
+
 # ── Scheduler ──────────────────────────────────────────────
 
 class DailyScheduler:
@@ -795,6 +929,7 @@ class DailyScheduler:
         ScheduledTask("morning_check",     7, 30, _morning_check,      TaskPriority.CRITICAL, True,  120, 2),
         # ── EU ────────────────────────────────────────────
         ScheduledTask("eu_pre_market",     8,  0, _eu_pre_market,      TaskPriority.NORMAL,   True,  60,  1),
+        ScheduledTask("circuit_breaker_reset", 8, 45, _circuit_breaker_reset, TaskPriority.CRITICAL, True, 30, 1),
         ScheduledTask("eu_market_open",    9,  0, _eu_market_open,     TaskPriority.HIGH,     True,  180, 1),
         # ── US Pre ────────────────────────────────────────
         ScheduledTask("us_pre_market",    10,  0, _us_pre_market,      TaskPriority.NORMAL,   True,  60,  1),
@@ -820,6 +955,11 @@ class DailyScheduler:
         ScheduledTask("maintenance",      23,  0, _maintenance,        TaskPriority.NORMAL,   False, 600, 1),
         # ── NPU/GPU Data Processor (weekly full retrain) ─
         ScheduledTask("data_processor_retrain", 23, 30, _data_processor_retrain, TaskPriority.LOW, False, 1800, 1),
+        # ── DB Maintenance (Saturday 03:00 CET) ──────────
+        # Prune signals.db (>90d) + learning.db + VACUUM both. Fires daily,
+        # no-ops on non-Saturdays. Low-traffic window chosen so VACUUM's
+        # exclusive lock doesn't interfere with live scanning.
+        ScheduledTask("db_maintenance", 3, 0, _db_maintenance, TaskPriority.LOW, False, 1800, 1),
     ]
 
     def __init__(self, tasks: list[ScheduledTask] | None = None):
@@ -888,9 +1028,15 @@ class DailyScheduler:
 
     def _run_loop(self) -> None:
         logger.info("[scheduler] Run loop started")
+        # Prime heartbeat so the watchdog doesn't flag us stale during the
+        # first 30s wait before the first tick.
+        _write_heartbeat()
         while not self._stop_event.is_set():
             try:
                 now_cet = _now_cet()
+                # Heartbeat BEFORE task execution — if a task hangs, the
+                # timestamp reflects when the loop last reached this line.
+                _write_heartbeat(now_cet)
                 for task in self._tasks:
                     if not task.enabled:
                         continue

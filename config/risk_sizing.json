@@ -1,5 +1,6 @@
 {
-  "max_position_pct": 0.10,
-  "max_exposure_pct": 0.95,
-  "max_dkk_per_symbol": 100000
+  "max_position_pct": 0.1,
+  "max_exposure_pct": 30.0,
+  "max_dkk_per_symbol": 100000,
+  "_base_max_exposure_pct": 0.95
 }

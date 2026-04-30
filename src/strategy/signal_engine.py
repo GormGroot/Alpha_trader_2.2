@@ -78,9 +78,20 @@ class SignalStore:
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
+        # journal_mode=WAL is persistent across connections (SQLite writes
+        # it into the DB file header on first set) — applied in _init_db()
+        # once. synchronous is per-connection and busy_timeout is a
+        # per-connection wait.
+        conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+        conn.execute("PRAGMA busy_timeout=30000").fetchone()
+        return conn
 
     def _init_db(self) -> None:
+        # First-open: set the persistent journal_mode. Subsequent
+        # connections inherit it automatically.
+        with sqlite3.connect(self._db_path, timeout=30.0) as _setup:
+            _setup.execute("PRAGMA journal_mode=WAL").fetchone()
         with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS signal_history (
@@ -94,9 +105,17 @@ class SignalStore:
                     strategies  TEXT
                 )
             """)
+            # Existing composite index covers symbol-lookups. The two
+            # standalone indexes accelerate the common "what happened at
+            # time T" and "latest N signals" dashboard queries without
+            # blowing up write-amplification.
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_signal_symbol_ts
                 ON signal_history (symbol, timestamp)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_signal_ts
+                ON signal_history (timestamp)
             """)
 
     def save(self, sig: SymbolSignal) -> None:
@@ -169,16 +188,44 @@ class SignalStore:
         with self._get_conn() as conn:
             return conn.execute(query, params).fetchone()[0]
 
-    def prune(self, keep_days: int = 14) -> None:
-        """Remove signal history older than keep_days to prevent unbounded growth."""
+    def prune(self, keep_days: int = 90) -> None:
+        """Remove signal history older than keep_days to prevent unbounded growth.
+
+        Default 90 days aligns with Fase 1 infra plan. Prior default (14) was
+        aggressive enough to delete data before the ContinuousLearner could
+        build statistics on it.
+        """
         try:
+            cutoff = (pd.Timestamp.now() - pd.Timedelta(days=keep_days)).isoformat()
             with self._get_conn() as conn:
-                cutoff = (pd.Timestamp.now() - pd.Timedelta(days=keep_days)).isoformat()
                 conn.execute(
                     "DELETE FROM signal_history WHERE timestamp < ?",
                     (cutoff,),
                 )
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # wal_checkpoint must run OUTSIDE any open transaction — running
+            # it inside the `with conn:` block raised SQLITE_LOCKED because
+            # the DELETE's implicit transaction was still holding the table.
+            try:
+                chk = sqlite3.connect(self._db_path, timeout=30.0)
+                try:
+                    chk.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                finally:
+                    chk.close()
+            except Exception:
+                pass  # checkpoint is best-effort housekeeping
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(f"[signals] prune failed: {exc}")
+
+    def vacuum(self) -> None:
+        """Reclaim disk space. Run monthly from the scheduler; never from the hot path."""
+        try:
+            # VACUUM must run outside a transaction and cannot share a
+            # connection that's holding one open.
+            conn = sqlite3.connect(self._db_path, timeout=60.0)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
         except Exception:
             pass
 

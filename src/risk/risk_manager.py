@@ -36,6 +36,7 @@ class RejectionReason(Enum):
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
     DUPLICATE_POSITION = "DUPLICATE_POSITION"
     TRADING_HALTED = "TRADING_HALTED"
+    BROKER_DISCONNECTED = "BROKER_DISCONNECTED"
 
 
 @dataclass
@@ -153,6 +154,11 @@ class RiskManager:
 
         self._trading_halted = False
         self._halt_reason = ""
+        self._connection_manager = None
+
+    def set_connection_manager(self, cm) -> None:
+        """Sæt ConnectionManager reference til broker-status checks."""
+        self._connection_manager = cm
 
     # ── Pre-trade check ──────────────────────────────────────
 
@@ -195,6 +201,14 @@ class RiskManager:
                 RejectionReason.TRADING_HALTED,
                 f"Handel stoppet: {self._halt_reason}",
             )
+
+        # 1b. Broker connection check — afvis nye ordrer hvis alle brokers er disconnected
+        if self._connection_manager is not None and not _is_exit:
+            if not self._connection_manager.is_any_connected():
+                return self._reject(
+                    RejectionReason.BROKER_DISCONNECTED,
+                    "Alle brokers er disconnected — afviser ordre",
+                )
 
         # 2. Max drawdown
         dd = self.portfolio.current_drawdown_pct

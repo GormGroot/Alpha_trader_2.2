@@ -15,6 +15,7 @@ SIGNAL_DB = Path("data_cache/signal_log.db")
 
 
 @router.get("")
+@router.get("/")
 async def get_signals(limit: int = 30, _: str = Depends(get_current_user)):
     """Latest trading signals."""
     if not SIGNAL_DB.exists():

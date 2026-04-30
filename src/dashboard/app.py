@@ -208,8 +208,9 @@ def _preload_worker() -> None:
         _run_backtests()
         logger.info("Background preload: done")
     except Exception as exc:
+        import traceback
         _preload_error = str(exc)
-        logger.error(f"Background preload failed: {exc}")
+        logger.error(f"Background preload failed: {exc}\n{traceback.format_exc()}")
     finally:
         _preload_done.set()
 
@@ -9495,6 +9496,13 @@ register_status_callbacks(app)
 register_market_callbacks(app)
 
 server = app.server
+
+# ── Auth + /healthz ───────────────────────────────────────
+# HTTP Basic auth activates only when DASHBOARD_USER + DASHBOARD_PASS are
+# set in the environment. /healthz is always reachable for Docker's
+# HEALTHCHECK. See src/dashboard/auth.py for the threat model.
+from src.dashboard.auth import install_auth  # noqa: E402 — must follow `app`
+install_auth(server)
 
 if __name__ == "__main__":
     app.run(

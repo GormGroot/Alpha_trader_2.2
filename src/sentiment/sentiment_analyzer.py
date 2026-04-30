@@ -171,6 +171,12 @@ class SentimentAnalyzer:
       3. Keyword fallback
     """
 
+    # Class-level cache — deles mellem alle instanser (undgår 328x init-log)
+    _shared_npu = None
+    _shared_npu_checked = False
+    _shared_cpu_model = None
+    _shared_cpu_checked = False
+
     def __init__(
         self,
         use_finbert: bool = True,
@@ -184,25 +190,36 @@ class SentimentAnalyzer:
         self._npu_analyzer    = None
         self._use_npu         = False
 
-        # Try NPU first
+        # Try NPU first (shared singleton)
         if use_finbert:
             self._try_init_npu()
 
-        # Fall back to CPU FinBERT
+        # Fall back to CPU FinBERT (shared singleton)
         if not self._use_npu and use_finbert:
-            self._cpu_model = _load_finbert()
+            if not SentimentAnalyzer._shared_cpu_checked:
+                SentimentAnalyzer._shared_cpu_model = _load_finbert()
+                SentimentAnalyzer._shared_cpu_checked = True
+            self._cpu_model = SentimentAnalyzer._shared_cpu_model
 
     def _try_init_npu(self) -> None:
         """Attempt to initialize NPU sentiment analyzer."""
+        if SentimentAnalyzer._shared_npu_checked:
+            # Genbrug resultat fra første init
+            if SentimentAnalyzer._shared_npu is not None:
+                self._npu_analyzer = SentimentAnalyzer._shared_npu
+                self._use_npu = True
+            return
+
+        SentimentAnalyzer._shared_npu_checked = True
         try:
             from src.ops.npu_accelerator import NPUSentimentAnalyzer
             npu = NPUSentimentAnalyzer()
             if npu.initialize():
-                # Check if NPU is actually being used
                 test = npu.analyze("test")
                 if test.get("device") in ("NPU", "CPU"):
                     self._npu_analyzer = npu
                     self._use_npu = test.get("device") == "NPU"
+                    SentimentAnalyzer._shared_npu = npu
                     logger.info(
                         f"[sentiment] Using {'NPU 🚀' if self._use_npu else 'CPU'} "
                         f"via NPU accelerator"

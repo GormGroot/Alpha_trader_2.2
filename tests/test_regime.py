@@ -48,7 +48,7 @@ def _make_df(
 ) -> pd.DataFrame:
     """Generér syntetisk OHLCV."""
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
     returns = trend + rng.normal(0, noise, n)
     prices = start_price * np.cumprod(1 + returns)
     volume = rng.integers(1_000_000, 10_000_000, n).astype(float)
@@ -80,7 +80,7 @@ def _make_crash() -> pd.DataFrame:
     """Voldsomt fald med ekstremt høj vol."""
     rng = np.random.default_rng(99)
     n = 250
-    dates = pd.date_range(end=datetime.now(), periods=n, freq="B")
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n + 2)[-n:]
     # Normal periode, derefter crash
     returns = np.concatenate([
         rng.normal(0.001, 0.01, 200),

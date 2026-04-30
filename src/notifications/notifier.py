@@ -5,6 +5,7 @@ Understøtter flere kanaler:
   - EmailChannel: SMTP-baseret email (kræver konfiguration)
   - LogChannel: Logger til fil via loguru (altid aktiv)
   - CallbackChannel: Custom handler (til dashboard, webhooks osv.)
+  - TelegramChannel: Telegram-bot beskeder (kræver TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)
 
 Alle notifikationer gemmes i SQLite til historik.
 """
@@ -14,6 +15,10 @@ from __future__ import annotations
 import html as _html
 import smtplib
 import sqlite3
+import ssl
+import time
+import urllib.request
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +28,12 @@ from pathlib import Path
 from typing import Callable
 
 from loguru import logger
+
+try:
+    import certifi
+    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _SSL_CTX = ssl.create_default_context()
 
 
 # ── Kanaler ───────────────────────────────────────────────────
@@ -174,6 +185,71 @@ class CallbackChannel(NotificationChannel):
             return False
 
 
+class TelegramChannel(NotificationChannel):
+    """
+    Sender notifikationer via Telegram-bot.
+
+    Kræver disse to miljøvariabler i .env:
+      TELEGRAM_BOT_TOKEN  – fra @BotFather
+      TELEGRAM_CHAT_ID    – dit personlige chat-id
+
+    Rate limiting: max 1 besked per 10 sekunder per category.
+    Severity-ikoner: 🔴 CRITICAL, 🟡 WARNING, 🟢 INFO
+    """
+
+    _ICONS = {"CRITICAL": "🔴", "WARNING": "🟡", "INFO": "🟢"}
+    _API = "https://api.telegram.org/bot{token}/sendMessage"
+    _COOLDOWN = 10  # sekunder
+
+    def __init__(self, bot_token: str, chat_id: str) -> None:
+        self._token = bot_token.strip()
+        self._chat_id = chat_id.strip()
+        self._configured = bool(self._token and self._chat_id)
+        self._last_sent: dict[str, float] = {}
+
+    @property
+    def is_configured(self) -> bool:
+        return self._configured
+
+    def send(self, severity: str, title: str, message: str, category: str) -> bool:
+        if not self._configured:
+            logger.debug("[telegram] Ikke konfigureret – springer over")
+            return False
+
+        # Rate limiting
+        now = time.time()
+        if now - self._last_sent.get(category, 0) < self._COOLDOWN:
+            logger.debug(f"[telegram] Rate limited: {category}")
+            return False
+        self._last_sent[category] = now
+
+        icon = self._ICONS.get(severity, "🔵")
+        short_msg = message[:300] + "…" if len(message) > 300 else message
+        text = (
+            f"{icon} *{severity}* | {title}\n"
+            f"_{category}_ · {datetime.now().strftime('%d/%m %H:%M')}\n\n"
+            f"{short_msg}"
+        )
+
+        try:
+            url = self._API.format(token=self._token)
+            payload = urllib.parse.urlencode({
+                "chat_id": self._chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+            }).encode()
+            req = urllib.request.Request(url, data=payload, method="POST")
+            with urllib.request.urlopen(req, timeout=5, context=_SSL_CTX) as resp:
+                if resp.status == 200:
+                    logger.info(f"[telegram] Sendt: {title}")
+                    return True
+                logger.warning(f"[telegram] HTTP {resp.status}")
+                return False
+        except Exception as exc:
+            logger.error(f"[telegram] Fejl: {exc}")
+            return False
+
+
 # ── Notifier ──────────────────────────────────────────────────
 
 
@@ -186,6 +262,7 @@ class Notifier:
     """
 
     def __init__(self, cache_dir: str = "data_cache") -> None:
+        import os
         self._channels: list[NotificationChannel] = []
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +271,14 @@ class Notifier:
 
         # Altid log
         self.add_channel(LogChannel())
+
+        # Telegram – aktiveres automatisk hvis env-vars er sat
+        tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        tg_chat  = os.getenv("TELEGRAM_CHAT_ID", "")
+        if tg_token and tg_chat:
+            tg = TelegramChannel(tg_token, tg_chat)
+            self.add_channel(tg)
+            logger.info("[notifier] Telegram-kanal aktiveret")
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:

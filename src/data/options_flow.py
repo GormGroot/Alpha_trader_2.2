@@ -855,6 +855,29 @@ class OptionsFlowTracker:
         """
         alerts: list[str] = []
 
+        # Early-exit: tjek om symbolet har options overhovedet (undgå 4x redundante API-kald)
+        if _HAS_YF:
+            try:
+                self._throttle()
+                ticker = yf.Ticker(symbol.upper())
+                if not ticker.options:
+                    logger.debug(f"[options] {symbol} har ingen options — springer over")
+                    return OptionsFlowSummary(
+                        symbol=symbol.upper(),
+                        unusual_activity=[],
+                        put_call_ratio=None,
+                        max_pain=None,
+                        iv_analysis=None,
+                    )
+            except Exception:
+                return OptionsFlowSummary(
+                    symbol=symbol.upper(),
+                    unusual_activity=[],
+                    put_call_ratio=None,
+                    max_pain=None,
+                    iv_analysis=None,
+                )
+
         # 1. Unusual activity
         try:
             uoa = self.detect_unusual_activity(symbol)

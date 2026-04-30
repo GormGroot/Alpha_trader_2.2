@@ -1,0 +1,56 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Virtual envs
+venv
+.venv
+env
+.env
+.env.*
+
+# Secrets
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# Python build artefacts
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Runtime data that must NOT be baked into the image
+data_cache
+logs
+backups
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+*~
+
+# Docs/tests/notebooks (keep image lean)
+*.md
+docs
+tests
+notebooks
+*.ipynb
+
+# Node/JS artefacts from sibling folders
+node_modules
+
+# Plan/session artefacts
+sessions

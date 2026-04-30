@@ -15,6 +15,7 @@ NOTIF_DB = Path("data_cache/notifications.db")
 
 
 @router.get("")
+@router.get("/")
 async def get_notifications(limit: int = 20, _: str = Depends(get_current_user)):
     """Recent notifications/alerts."""
     if not NOTIF_DB.exists():

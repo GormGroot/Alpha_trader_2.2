@@ -125,9 +125,27 @@ class ContinuousLearner:
 
     # ─── Database Setup ─────────────────────────────────────
 
+    def _connect(self) -> sqlite3.Connection:
+        """Get a tuned connection to learning.db.
+
+        WAL + NORMAL lets the trader thread write trade outcomes while the
+        dashboard/analytics threads read concurrently. busy_timeout of 30s
+        absorbs the occasional long retrain-transaction instead of raising
+        OperationalError to callers.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        # journal_mode=WAL is stored in the DB file header; set once in
+        # _init_db. synchronous and busy_timeout are per-connection.
+        conn.execute("PRAGMA synchronous=NORMAL").fetchone()
+        conn.execute("PRAGMA busy_timeout=30000").fetchone()
+        return conn
+
     def _init_db(self):
         """Opret learning database"""
-        with sqlite3.connect(self.db_path) as db:
+        # First-open: enable WAL persistently.
+        with sqlite3.connect(self.db_path, timeout=30.0) as _setup:
+            _setup.execute("PRAGMA journal_mode=WAL").fetchone()
+        with self._connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS trade_outcomes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +212,16 @@ class ContinuousLearner:
                     ON trade_outcomes(regime_at_entry);
                 CREATE INDEX IF NOT EXISTS idx_scores_model
                     ON model_scores(model_name);
+                -- Timestamp indexes accelerate the prune-DELETE path and
+                -- the "last N events" dashboard queries.
+                CREATE INDEX IF NOT EXISTS idx_outcomes_ts
+                    ON trade_outcomes(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_scores_ts
+                    ON model_scores(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_drift_ts
+                    ON drift_events(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_log_ts
+                    ON learning_log(timestamp);
             """)
         logger.debug("Learning database klar")
 
@@ -208,7 +236,7 @@ class ContinuousLearner:
         lesson = self._analyze_trade(outcome)
 
         # Gem i database
-        with sqlite3.connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("""
                 INSERT INTO trade_outcomes
                 (symbol, side, entry_price, exit_price, entry_time, exit_time,
@@ -330,7 +358,7 @@ class ContinuousLearner:
                     del self.model_performance[name]
 
             # Gem til database
-            with sqlite3.connect(self.db_path) as db:
+            with self._connect() as db:
                 db.execute("""
                     INSERT INTO model_scores
                     (model_name, accuracy_7d, accuracy_30d, accuracy_90d,
@@ -376,7 +404,7 @@ class ContinuousLearner:
         self.ensemble_weights = new_weights
 
         # Log til database
-        with sqlite3.connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("""
                 INSERT INTO learning_log (event_type, details, impact)
                 VALUES (?, ?, ?)
@@ -418,7 +446,7 @@ class ContinuousLearner:
             )
 
             # Log drift event
-            with sqlite3.connect(self.db_path) as db:
+            with self._connect() as db:
                 db.execute("""
                     INSERT INTO drift_events
                     (drift_type, severity, old_accuracy, new_accuracy, action_taken)
@@ -443,7 +471,7 @@ class ContinuousLearner:
             "type": "emergency"
         }
 
-        with sqlite3.connect(self.db_path) as db:
+        with self._connect() as db:
             db.execute("""
                 INSERT INTO learning_log (event_type, details, impact)
                 VALUES (?, ?, ?)
@@ -638,7 +666,7 @@ class ContinuousLearner:
                     )
 
         # Gem til database
-        with sqlite3.connect(self.db_path) as db:
+        with self._connect() as db:
             for m in matches:
                 db.execute("""
                     INSERT INTO crisis_similarities
@@ -772,7 +800,7 @@ class ContinuousLearner:
 
         try:
             # Hent trades der er completed men ikke lært fra
-            with sqlite3.connect(self.db_path) as learn_db:
+            with self._connect() as learn_db:
                 processed = set()
                 for row in learn_db.execute(
                     "SELECT entry_time, symbol FROM trade_outcomes"
@@ -790,6 +818,7 @@ class ContinuousLearner:
                 """).fetchall()
 
                 for t in trades:
+                    t = dict(t)  # sqlite3.Row → dict for .get() support
                     key = (t["timestamp"], t["symbol"])
                     if key not in processed:
                         outcome = TradeOutcome(
@@ -859,7 +888,7 @@ class ContinuousLearner:
             "common_lessons": [],
         }
 
-        with sqlite3.connect(self.db_path) as db:
+        with self._connect() as db:
             db.row_factory = sqlite3.Row
             trades = db.execute("SELECT * FROM trade_outcomes").fetchall()
 
@@ -906,7 +935,7 @@ class ContinuousLearner:
     def _prune_learning_db(self) -> None:
         """Remove old entries to prevent unbounded DB growth."""
         try:
-            with sqlite3.connect(self.db_path) as db:
+            with self._connect() as db:
                 db.execute(
                     "DELETE FROM trade_outcomes WHERE timestamp < datetime('now', '-90 days')"
                 )
@@ -922,7 +951,17 @@ class ContinuousLearner:
                 db.execute(
                     "DELETE FROM crisis_similarities WHERE timestamp < datetime('now', '-30 days')"
                 )
-                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # wal_checkpoint(TRUNCATE) must run OUTSIDE any open transaction —
+            # putting it inside the `with` block raises SQLITE_LOCKED because
+            # the pending DELETEs still hold the table.
+            try:
+                chk = sqlite3.connect(self.db_path, timeout=30.0)
+                try:
+                    chk.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                finally:
+                    chk.close()
+            except Exception:
+                pass  # checkpoint is best-effort housekeeping
             logger.debug("[learning] Database pruned (outcomes 90d, others 30d)")
         except Exception as e:
             logger.debug(f"[learning] DB prune error: {e}")
