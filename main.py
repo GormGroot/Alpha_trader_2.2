@@ -65,17 +65,8 @@ def setup_brokers(paper: bool = False) -> object:
     router = BrokerRouter()
     active_brokers = []
 
-    # 0. PaperBroker (altid tilgængelig — lokal simulator)
-    try:
-        from src.broker.paper_broker import PaperBroker
-        paper_broker = PaperBroker(initial_capital=100_000)
-        router.register("paper", paper_broker)
-        active_brokers.append("paper")
-        logger.info("[startup] PaperBroker registered (local simulator, $100k)")
-    except Exception as e:
-        logger.error(f"[startup] PaperBroker failed: {e}")
-
-    # 1. Alpaca (kun hvis API-nøgler er sat OG vi ikke er i paper-only mode)
+    # 1. Alpaca FIRST — vi vil bruge Alpaca paper hvis nøgler er tilgængelige
+    alpaca_connected = False
     try:
         from src.broker.alpaca_broker import AlpacaBroker
         alpaca_key = os.getenv("ALPACA_API_KEY", "")
@@ -87,11 +78,27 @@ def setup_brokers(paper: bool = False) -> object:
                 alpaca.connect()
             router.register("alpaca", alpaca)
             active_brokers.append("alpaca")
-            logger.info(f"[startup] Alpaca connected ({'paper' if paper else 'live'})")
+            alpaca_connected = True
+            logger.info(f"[startup] Alpaca connected ({'paper' if paper else 'live'}) — primary broker")
         else:
-            logger.info("[startup] Alpaca: No API keys — using PaperBroker as fallback")
+            logger.info("[startup] Alpaca: No API keys — falling back to local PaperBroker")
     except Exception as e:
-        logger.warning(f"[startup] Alpaca failed: {e} — PaperBroker available as fallback")
+        logger.warning(f"[startup] Alpaca failed: {e} — falling back to local PaperBroker")
+
+    # 0. PaperBroker — KUN hvis Alpaca ikke er tilgængelig (Phase A1 fix:
+    # tidligere kørte begge samtidig, hvilket gav DUPLIKAT-positioner i
+    # router.get_positions() og forvirrede reconciliation).
+    if not alpaca_connected:
+        try:
+            from src.broker.paper_broker import PaperBroker
+            paper_broker = PaperBroker(initial_capital=100_000)
+            router.register("paper", paper_broker)
+            active_brokers.append("paper")
+            logger.info("[startup] PaperBroker registered (local simulator, $100k)")
+        except Exception as e:
+            logger.error(f"[startup] PaperBroker failed: {e}")
+    else:
+        logger.info("[startup] PaperBroker SKIPPED — Alpaca paper er aktiv")
 
     # 2. Saxo Bank
     try:
@@ -139,13 +146,18 @@ def setup_brokers(paper: bool = False) -> object:
     try:
         from src.broker.nordnet_broker import NordnetBroker
         from src.broker.nordnet_auth import NordnetSession, NordnetConfig
-        nordnet_user = os.getenv("NORDNET_USER", "")
-        nordnet_pass = os.getenv("NORDNET_PASS", "")
+        # Accept både NORDNET_USER/PASS/COUNTRY (legacy) og NORDNET_USERNAME/PASSWORD/MARKET
+        nordnet_user = os.getenv("NORDNET_USER", "") or os.getenv("NORDNET_USERNAME", "")
+        nordnet_pass = os.getenv("NORDNET_PASS", "") or os.getenv("NORDNET_PASSWORD", "")
         if nordnet_user and nordnet_pass:
-            country = os.getenv("NORDNET_COUNTRY", "dk")
-            config = NordnetConfig(country=country)
+            country = os.getenv("NORDNET_COUNTRY", "") or os.getenv("NORDNET_MARKET", "dk")
+            config = NordnetConfig(
+                username=nordnet_user,
+                password=nordnet_pass,
+                market=country,
+            )
             session = NordnetSession(config)
-            session.login(nordnet_user, nordnet_pass)
+            session.login()
             nordnet = NordnetBroker(session=session)
             nordnet.connect()
             router.register("nordnet", nordnet)
@@ -391,6 +403,15 @@ def start_continuous_scanner(auto_trader, interval_minutes: int = 1) -> tuple[th
                         f"[scanner] ── Scan kl. {now:%H:%M} CET ──"
                         f" Åbne markeder: {open_markets or ['alle']}"
                     )
+                    # Stale-order cleanup (P0 #5): cancel ordrer >2 min gamle
+                    try:
+                        from src.broker.registry import get_order_manager
+                        _om = get_order_manager()
+                        if _om is not None:
+                            _om.cancel_stale_orders(max_age_minutes=2.0)
+                    except Exception as _se:
+                        logger.warning(f"[scanner] Stale-order check fejl: {_se}")
+
                     scan_start = time.time()
                     result = auto_trader.scan_and_trade()
                     scan_duration = time.time() - scan_start
@@ -502,27 +523,104 @@ def run_trader(args: argparse.Namespace) -> None:
             rm.set_connection_manager(cm)
             logger.info("[startup] ConnectionManager → RiskManager wired (broker disconnect = ordre afvist)")
 
-    # 4b. Position-reconciliation — synkronisér broker-positioner med lokal portfolio
-    if not args.paper and auto_trader is not None:
+    # 4b. Position-reconciliation — kører ALTID (også paper, fra Phase A1).
+    # Tidligere kørte vi kun reconciliation i live-mode. Det betød paper-portfolio
+    # drev fra Alpaca-paper-konto: PWA viste 19 positioner mens Alpaca havde 11
+    # og AAPL var long i PWA, SHORT hos Alpaca. Nu bringer vi lokal tracker i
+    # synk med broker-realiteten ved opstart, både paper og live.
+    if auto_trader is not None:
         try:
             rm = getattr(auto_trader, '_risk_manager', None)
             if rm and hasattr(rm, 'portfolio'):
                 broker_positions = router.get_positions()
+                broker_symbols = {pos.symbol for pos in broker_positions}
+                local_symbols = set(rm.portfolio.positions.keys())
+
+                # 1. Tilføj broker-positioner mangler lokalt
                 synced = 0
                 for pos in broker_positions:
-                    if pos.symbol not in rm.portfolio.positions:
+                    local = rm.portfolio.positions.get(pos.symbol)
+                    needs_sync = (
+                        local is None
+                        or local.side != pos.side
+                        or abs(local.qty - pos.qty) > 0.001
+                    )
+                    if needs_sync:
+                        if local is not None:
+                            # Side eller qty mismatch → drop lokal, brug broker
+                            rm.portfolio.close_position(
+                                symbol=pos.symbol,
+                                price=pos.current_price or pos.entry_price,
+                                reason="reconcile_drift",
+                            )
                         rm.portfolio.open_position(
                             symbol=pos.symbol,
                             qty=pos.qty,
                             price=pos.current_price or pos.entry_price,
                             side=pos.side,
+                            reconcile=True,
                         )
                         synced += 1
-                        logger.info(f"[reconcile] Synkroniseret: {pos.symbol} ({pos.side}, {pos.qty} @ ${pos.entry_price:.2f})")
-                if synced > 0:
-                    logger.info(f"[reconcile] {synced} broker-positioner synkroniseret til lokal portfolio")
+                        logger.info(
+                            f"[reconcile] Synkroniseret: {pos.symbol} "
+                            f"({pos.side}, {pos.qty} @ ${pos.entry_price:.2f})"
+                        )
+
+                # 2. Drop lokal-only phantoms (eksisterer ikke hos broker)
+                phantoms = local_symbols - broker_symbols
+                if phantoms:
+                    logger.warning(
+                        f"[reconcile] Dropper {len(phantoms)} phantom-positioner: "
+                        f"{sorted(phantoms)}"
+                    )
+                    for sym in phantoms:
+                        try:
+                            current = rm.portfolio.positions[sym].current_price or rm.portfolio.positions[sym].entry_price
+                            rm.portfolio.close_position(
+                                symbol=sym,
+                                price=current,
+                                reason="phantom_no_broker_match",
+                            )
+                        except Exception as ce:
+                            logger.warning(f"[reconcile] Kunne ikke lukke phantom {sym}: {ce}")
+
+                if synced > 0 or phantoms:
+                    logger.info(
+                        f"[reconcile] Done: {synced} synkroniseret, "
+                        f"{len(phantoms)} phantoms droppet, "
+                        f"{len(broker_positions)} positioner aktive"
+                    )
                 else:
-                    logger.info("[reconcile] Ingen åbne broker-positioner at synkronisere")
+                    logger.info(
+                        f"[reconcile] Lokal portfolio matcher broker "
+                        f"({len(broker_positions)} positioner)"
+                    )
+
+                # Phase A3: Sync equity-tracking fra broker så drawdown-beregning
+                # afspejler broker-realiteten (ikke en stale lokal cash-værdi).
+                try:
+                    acc = router.get_account()
+                    if acc and acc.equity > 0:
+                        broker_equity = float(acc.equity)
+                        broker_cash = float(acc.cash)
+                        # Sæt cash til broker's faktiske kontant-balance
+                        rm.portfolio.cash = broker_cash
+                        # Initialise peak_equity til broker-equity hvis ikke sat
+                        # (eller lavere — vi vil ikke kunstigt øge peak)
+                        if rm.portfolio._peak_equity < broker_equity:
+                            rm.portfolio._peak_equity = broker_equity
+                        # daily_start_equity: sæt til broker-equity hvis det er
+                        # første sync i dag (vil bruges af circuit breaker)
+                        if rm.portfolio._daily_start_equity == 0:
+                            rm.portfolio._daily_start_equity = broker_equity
+                        logger.info(
+                            f"[reconcile] Equity sync: broker=${broker_equity:,.2f}, "
+                            f"cash=${broker_cash:,.2f}, "
+                            f"peak=${rm.portfolio._peak_equity:,.2f}, "
+                            f"DD={rm.portfolio.current_drawdown_pct:.1%}"
+                        )
+                except Exception as ee:
+                    logger.warning(f"[reconcile] Equity sync fejlede: {ee}")
         except Exception as e:
             logger.warning(f"[reconcile] Position-reconciliation fejlede: {e}")
 

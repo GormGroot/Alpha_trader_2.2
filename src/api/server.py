@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from src.api.auth import authenticate, create_token, token_ttl_seconds
 from src.api.geo_lock import extract_client_ip, get_geo_lock_service
-from src.api.routes import health, notifications, portfolio, signals
+from src.api.routes import control, health, notifications, portfolio, signals
 from src.api.security_notify import (
     notify_geo_blocked,
     notify_login_failed,
@@ -204,6 +204,7 @@ app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"]
 app.include_router(signals.router,   prefix="/api/signals",   tags=["signals"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 app.include_router(health.router,    prefix="/api/health",    tags=["health"])
+app.include_router(control.router,   prefix="/api/control",   tags=["control"])
 
 # ── Static / PWA ──────────────────────────────────────────────
 STATIC_DIR = Path(__file__).parent / "static"

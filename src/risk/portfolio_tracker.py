@@ -339,18 +339,31 @@ class PortfolioTracker:
         qty: float,
         price: float,
         timestamp: str | None = None,
+        reconcile: bool = False,
     ) -> Position:
         """Åbn en ny position (long eller short).
 
         For long: cash reduceres med cost (vi køber aktier).
         For short: cash øges med proceeds (vi sælger lånte aktier).
+
+        Args:
+            reconcile: Hvis True, springes cash-/margin-checks over og cash
+                berøres ikke. Brug KUN ved sync mod broker-realiteten — vi
+                registrerer en position som allerede eksisterer hos broker.
         """
         if symbol in self.positions:
             raise ValueError(f"Position i {symbol} eksisterer allerede")
 
         cost = qty * price
 
-        if side == "short":
+        if reconcile:
+            # Phase A1.4: Reconciliation-path — repræsentér broker-position
+            # uden at forstyrre lokal cash. Cash hentes fra broker via /summary.
+            logger.debug(
+                f"[reconcile] Opretter lokal position uden cash-check: "
+                f"{side} {qty} {symbol} @ ${price:.2f}"
+            )
+        elif side == "short":
             # Short: vi modtager proceeds, men reserverer margin (150% af cost)
             margin_requirement = cost * 1.5
             if margin_requirement > self.cash + cost:

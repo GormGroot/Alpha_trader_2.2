@@ -310,6 +310,12 @@ class AutoTrader:
         # Tracks last exit time per symbol to make _check_exits idempotent.
         self._last_exit: dict[str, datetime] = {}
 
+        # Phase A5: User-controlled pause flag. Når True springer scan_and_trade
+        # entry-fase over (exits tillades stadig — vi vil altid kunne lukke
+        # positioner manuelt). Sat via PWA Pause-knap eller dashboard.
+        self._paused: bool = False
+        self._paused_at: datetime | None = None
+
         mode = "PAPER" if paper else "⚠️  LIVE"
         logger.info(
             f"[auto] AutoTrader initialiseret — {mode} mode, "
@@ -352,6 +358,59 @@ class AutoTrader:
                 if s not in self.watchlist:
                     self.watchlist.append(s)
             logger.info(f"[auto] Crypto trading enabled — {len(self.watchlist)} symbols")
+
+    PAUSE_FLAG_PATH = Path("data_cache/trading_paused.flag")
+
+    def set_paused(self, paused: bool, reason: str = "user") -> dict:
+        """Phase A5: Pause/resume trading. Exits tillades stadig.
+
+        Persists a flag file under data_cache/ so the API subprocess and
+        the AutoTrader (different processes) share state.
+        """
+        was = self._paused
+        self._paused = bool(paused)
+        if self._paused and not was:
+            self._paused_at = _now_cet()
+            logger.warning(f"[auto] ⏸️  Trading PAUSED (reason: {reason})")
+            try:
+                self.PAUSE_FLAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                self.PAUSE_FLAG_PATH.write_text(
+                    f"{self._paused_at.isoformat()}\nreason={reason}\n"
+                )
+            except Exception as e:
+                logger.warning(f"[auto] Kunne ikke skrive pause-flag: {e}")
+        elif not self._paused and was:
+            duration = (_now_cet() - self._paused_at).total_seconds() if self._paused_at else 0
+            self._paused_at = None
+            logger.info(f"[auto] ▶️  Trading RESUMED (var pause i {duration:.0f}s)")
+            try:
+                if self.PAUSE_FLAG_PATH.exists():
+                    self.PAUSE_FLAG_PATH.unlink()
+            except Exception as e:
+                logger.warning(f"[auto] Kunne ikke slette pause-flag: {e}")
+        return {
+            "paused": self._paused,
+            "since": self._paused_at.isoformat() if self._paused_at else None,
+            "reason": reason,
+        }
+
+    @property
+    def is_paused(self) -> bool:
+        # Inkludér flag-fil så pause-handlinger fra API-subprocess respekteres
+        if self._paused:
+            return True
+        try:
+            if self.PAUSE_FLAG_PATH.exists():
+                # Læs ind i instans
+                self._paused = True
+                content = self.PAUSE_FLAG_PATH.read_text().strip().split("\n")
+                if content and content[0]:
+                    self._paused_at = datetime.fromisoformat(content[0])
+                logger.warning(f"[auto] ⏸️  Pause-flag detekteret — trading paused")
+                return True
+        except Exception:
+            pass
+        return False
 
     def set_pattern_strategy(self, enabled: bool) -> None:
         """Enable/disable pattern analysis in trading pipeline."""
@@ -597,38 +656,61 @@ class AutoTrader:
             except Exception as e:
                 logger.warning(f"[auto] Pattern strategy failed: {e}")
 
-        # ML Strategy — forsøg at loade Gorm's pre-trænede model fra disk
+        # Phase A2: ML-strategier inkluderes KUN hvis modellen reelt er trænet.
+        # Tidligere blev utrænede modeller registreret med 0.25/0.35 vægt, men
+        # de returnerer altid HOLD med confidence=0. Det skævvred ensemble-
+        # gennemsnit (60% af stemmer var "tom" stemme). Nu skip'es de helt
+        # indtil Gorm har kørt train_remote.py og lagt models/*.joblib på disk.
+        ml_skipped: list[str] = []
+
+        # ML Strategy
         try:
             from src.strategy.ml_strategy import MLStrategy
             from pathlib import Path
             ml_latest = Path("models/ml_latest.joblib")
             if ml_latest.exists():
                 ml = MLStrategy.load(ml_latest)
-                strats.append((ml, 0.25))
-                logger.info(f"[auto] MLStrategy loaded from {ml_latest} (0.25 weight)")
+                if getattr(ml, "is_trained", False):
+                    strats.append((ml, 0.25))
+                    logger.info(f"[auto] ✅ MLStrategy loaded from {ml_latest} (0.25 weight)")
+                else:
+                    ml_skipped.append(f"MLStrategy (loaded but is_trained=False)")
             else:
-                # Ingen gemt model — opret ny (utrænet, bruges ikke til signaler endnu)
-                ml = MLStrategy()
-                strats.append((ml, 0.25))
-                logger.info("[auto] MLStrategy enabled untrained — run train_remote.py on Gorm's machine (0.25 weight)")
+                ml_skipped.append("MLStrategy (models/ml_latest.joblib mangler)")
         except Exception as e:
-            logger.debug(f"[auto] ML strategy not available: {e}")
+            ml_skipped.append(f"MLStrategy ({type(e).__name__}: {e})")
 
-        # Ensemble ML Strategy — forsøg at loade Gorm's pre-trænede model fra disk
+        # Ensemble ML Strategy
         try:
             from src.strategy.ensemble_ml_strategy import EnsembleMLStrategy
             from pathlib import Path
             ens_latest = Path("models/ensemble_latest.joblib")
             if ens_latest.exists():
                 ensemble = EnsembleMLStrategy.load(ens_latest)
-                strats.append((ensemble, 0.35))
-                logger.info(f"[auto] EnsembleMLStrategy loaded from {ens_latest} (0.35 weight)")
+                if getattr(ensemble, "is_trained", False):
+                    strats.append((ensemble, 0.35))
+                    logger.info(f"[auto] ✅ EnsembleMLStrategy loaded from {ens_latest} (0.35 weight)")
+                else:
+                    ml_skipped.append(f"EnsembleMLStrategy (loaded but is_trained=False)")
             else:
-                ensemble = EnsembleMLStrategy()
-                strats.append((ensemble, 0.35))
-                logger.info("[auto] EnsembleMLStrategy enabled untrained — run train_remote.py on Gorm's machine (0.35 weight)")
+                ml_skipped.append("EnsembleMLStrategy (models/ensemble_latest.joblib mangler)")
         except Exception as e:
-            logger.debug(f"[auto] Ensemble ML strategy not available: {e}")
+            ml_skipped.append(f"EnsembleMLStrategy ({type(e).__name__}: {e})")
+
+        if ml_skipped:
+            logger.warning(
+                f"[auto] ⚠️  ML-strategier deaktiveret: {ml_skipped}. "
+                f"Kør train_remote.py på Gorms maskine for at aktivere dem."
+            )
+
+        # Logg klart hvilke strategier der er aktive — fjerner mystik om vægtning
+        active_summary = ", ".join(
+            f"{getattr(s, 'name', type(s).__name__)}({w:.2f})"
+            for s, w in strats
+        )
+        logger.info(f"[auto] ✅ Aktive strategier: {active_summary}")
+        if ml_skipped:
+            logger.info(f"[auto] ❌ Inaktive: {', '.join(ml_skipped)}")
 
         return strats
 
@@ -683,6 +765,12 @@ class AutoTrader:
         # Feedback loop: adjust thresholds every 20 scans
         if self._total_scans % 20 == 0:
             self._apply_feedback_adjustments()
+
+        # Phase A1.4: Periodic position-reconciliation (every 5 scans).
+        # Catches drift between local PortfolioTracker and broker reality
+        # (e.g. partial fills, manual sells via PWA, broker-side stop-outs).
+        if self._total_scans % 5 == 0:
+            self._reconcile_positions_with_broker()
 
         # ── Determine which markets are open right now ────
         open_markets = []
@@ -911,14 +999,23 @@ class AutoTrader:
         # ── 3. Check exits ────────────────────────────────
         exit_actions = self._check_exits(data)
         result.exit_signals = len(exit_actions)
+        symbols_already_processed: set[str] = set()
         for action in exit_actions:
             self._execute_action(action)
             result.actions.append(action)
             if action.executed:
                 result.trades_executed += 1
                 result.sells_proposed  += 1
+                symbols_already_processed.add(action.symbol)
 
         # ── 4. Process entry signals with handoff adjustment
+        # Phase A5: Pause-flag → spring entry-fase helt over
+        if self._paused:
+            logger.info("[auto] ⏸️  Paused — springer entry-signaler over (exits er stadig udført)")
+            result.duration_sec = time.time() - t0
+            self._log_scan(result)
+            return result
+
         # Block new buys if regime says so (CRASH mode)
         if regime_adj and not regime_adj.allow_new_buys:
             buy_count = sum(1 for s in all_signals if s.signal == Signal.BUY)
@@ -927,6 +1024,20 @@ class AutoTrader:
                 logger.warning(
                     f"[regime] {regime_result.label}: Blocked {buy_count} BUY signals — "
                     f"only exits and shorts allowed"
+                )
+
+        # Phase A4: Skip entry-signals for symboler hvor en exit-action ALLEREDE
+        # er udført i samme scan-cyklus. Tidligere kunne stop-loss og strategi-
+        # SELL ramme samme symbol → vi lukkede positionen 2× og fik duplikat-
+        # rækker i closed_trades (XLRE 36-stk solgt på 200ms afstand 20/4-2026).
+        if symbols_already_processed:
+            n_before = len(all_signals)
+            all_signals = [s for s in all_signals if s.symbol not in symbols_already_processed]
+            n_skipped = n_before - len(all_signals)
+            if n_skipped > 0:
+                logger.info(
+                    f"[auto] Skip {n_skipped} entry-signaler for symboler "
+                    f"allerede exit'et: {sorted(symbols_already_processed)}"
                 )
 
         entry_actions = self._process_entry_signals(
@@ -1340,6 +1451,22 @@ class AutoTrader:
             self._execute_action_locked(action)
 
     def _execute_action_locked(self, action: TradeAction) -> None:
+        # Phase A4.2: DB-idempotency — afvis hvis vi har handlet samme
+        # (symbol, side) inden for de seneste 60 sek. Beskytter mod alle
+        # race-conditions vi måtte have overset (concurrent scans, exit+
+        # entry samme tick, scheduler+manual trigger samtidig).
+        try:
+            if self._has_recent_executed_trade(action.symbol, action.side, window_seconds=60):
+                logger.warning(
+                    f"[auto] DUPLIKAT BLOKERET: {action.side} {action.symbol} — "
+                    f"samme handel udført inden for 60 sek. Afvist."
+                )
+                action.executed = False
+                action.error = "duplicate_within_window"
+                return
+        except Exception as e:
+            logger.debug(f"[auto] Duplicate check fejlede (fortsætter): {e}")
+
         try:
             if action.side == "BUY":
                 order = self.router.buy(symbol=action.symbol, qty=action.qty)
@@ -1437,6 +1564,99 @@ class AutoTrader:
                  if (now - t).total_seconds() > 86400]
         for s in stale:
             del self._last_trade[s]
+
+    def _reconcile_positions_with_broker(self) -> None:
+        """Sync local RiskManager.portfolio with the broker's actual positions.
+
+        Phase A1.4: Catches drift between our local view and the broker's
+        reality. Drift sources include:
+          - Partial fills (we got filled at qty=10 but local says 15)
+          - Manual sells via PWA "Sælg"-button
+          - Broker-side stop-outs (margin calls, exchange halts)
+          - Time-in-force expirations
+          - Race conditions between multiple AutoTrader scans
+
+        Strategy:
+          1. Pull broker positions
+          2. For each broker position with side or qty mismatch → close+reopen
+          3. For local-only "phantom" positions (no broker match) → close them
+          4. Log the diff
+        """
+        if self._risk_manager is None or not hasattr(self._risk_manager, "portfolio"):
+            return
+        try:
+            broker_positions = self.router.get_positions()
+        except Exception as exc:
+            logger.warning(f"[reconcile] router.get_positions() fejlede: {exc}")
+            return
+
+        broker_map = {p.symbol: p for p in broker_positions}
+        rm_port = self._risk_manager.portfolio
+        local_symbols = set(rm_port.positions.keys())
+        broker_symbols = set(broker_map.keys())
+
+        synced = 0
+        for sym, pos in broker_map.items():
+            local = rm_port.positions.get(sym)
+            needs_sync = (
+                local is None
+                or local.side != pos.side
+                or abs(local.qty - pos.qty) > 0.001
+            )
+            if needs_sync:
+                if local is not None:
+                    rm_port.close_position(
+                        symbol=sym,
+                        price=pos.current_price or pos.entry_price,
+                        reason="reconcile_drift",
+                    )
+                rm_port.open_position(
+                    symbol=sym,
+                    qty=pos.qty,
+                    price=pos.current_price or pos.entry_price,
+                    side=pos.side,
+                    reconcile=True,
+                )
+                synced += 1
+                logger.warning(
+                    f"[reconcile] DRIFT detected — {sym}: local={local}, "
+                    f"broker={pos.side} {pos.qty}@${pos.entry_price:.2f}. Synced."
+                )
+
+        phantoms = local_symbols - broker_symbols
+        for sym in phantoms:
+            try:
+                p = rm_port.positions[sym]
+                rm_port.close_position(
+                    symbol=sym,
+                    price=p.current_price or p.entry_price,
+                    reason="phantom_no_broker_match",
+                )
+                logger.warning(
+                    f"[reconcile] Phantom dropped — {sym}: lokal havde "
+                    f"{p.side} {p.qty}@${p.entry_price:.2f} men broker kender ikke til positionen"
+                )
+            except Exception as ce:
+                logger.warning(f"[reconcile] Kunne ikke lukke phantom {sym}: {ce}")
+
+        if synced or phantoms:
+            logger.info(
+                f"[reconcile] Tick {self._total_scans}: "
+                f"{synced} synced, {len(phantoms)} phantoms dropped, "
+                f"{len(broker_positions)} active broker positions"
+            )
+
+        # Sync cash + peak from broker so drawdown calc reflects reality.
+        # Hvis broker rapporterer en højere equity end vores peak, opdater
+        # peak. Hvis lavere, lad være — peak er all-time-high.
+        try:
+            acc = self.router.get_account()
+            if acc and acc.equity > 0:
+                rm_port.cash = float(acc.cash)
+                if rm_port._peak_equity < float(acc.equity):
+                    rm_port._peak_equity = float(acc.equity)
+        except Exception as ee:
+            logger.debug(f"[reconcile] Periodic equity sync fejlede: {ee}")
 
     def _prune_databases(self) -> None:
         """Prune old scan/trade/signal logs to prevent unbounded DB growth."""
@@ -1744,6 +1964,30 @@ class AutoTrader:
             logger.warning(f"[adv-feedback] Advanced feedback error: {e}")
 
     # ── SQLite logging ────────────────────────────────────
+
+    def _has_recent_executed_trade(
+        self, symbol: str, side: str, window_seconds: int = 60
+    ) -> bool:
+        """Phase A4.2: Tjek om vi har en EXECUTED trade for (symbol, side)
+        inden for window_seconds. Bruges til idempotency.
+
+        Returns True hvis duplikat — kalder skal afvise.
+        """
+        try:
+            cutoff = (_now_cet() - pd.Timedelta(seconds=window_seconds)).isoformat()
+            with self._db_connect() as conn:
+                row = conn.execute(
+                    """SELECT id FROM trades
+                       WHERE symbol = ? AND side = ?
+                         AND timestamp >= ?
+                         AND executed = 1
+                       LIMIT 1""",
+                    (symbol, side, cutoff),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            # Hvis tabellen ikke findes endnu (første scan) → ingen duplikat
+            return False
 
     def _db_connect(self) -> sqlite3.Connection:
         """Tuned connection to auto_trader_log.db.

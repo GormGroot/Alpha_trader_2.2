@@ -170,14 +170,41 @@
     /* ── Position list ── */
     .position-row {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 12px 0; border-bottom: 1px solid var(--border);
+      padding: 12px 0; border-bottom: 1px solid var(--border); gap: 8px;
     }
     .position-row:last-child { border-bottom: none; }
+    .pos-left { flex: 1; min-width: 0; }
     .pos-left .symbol { font-size: 15px; font-weight: 600; }
     .pos-left .qty { font-size: 11px; color: var(--muted); margin-top: 2px; }
     .pos-right { text-align: right; }
     .pos-right .value { font-size: 15px; font-weight: 600; }
     .pos-right .pnl { font-size: 12px; margin-top: 2px; }
+    .close-btn {
+      background: rgba(255,47,0,0.12); color: #FF2F00; border: 1px solid rgba(255,47,0,0.3);
+      width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 14px;
+      font-weight: 700; transition: all 0.15s;
+    }
+    .close-btn:hover { background: rgba(255,47,0,0.25); transform: scale(1.05); }
+    .close-btn:active { transform: scale(0.95); }
+
+    /* ── Pause banner + control ── */
+    .pause-banner {
+      background: linear-gradient(135deg, #FF9F0A 0%, #FF6B00 100%);
+      color: #000; padding: 12px 16px; border-radius: 12px;
+      text-align: center; font-weight: 700; font-size: 14px;
+      margin-bottom: 12px; box-shadow: 0 4px 12px rgba(255,159,10,0.3);
+      animation: pulse-warn 2s ease-in-out infinite;
+    }
+    @keyframes pulse-warn { 0%,100% { opacity: 1; } 50% { opacity: 0.85; } }
+    .control-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .control-btn {
+      flex: 1; padding: 12px 16px; border-radius: 12px; border: none;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+    }
+    .control-btn.pause { background: rgba(255,159,10,0.15); color: #FF9F0A; border: 1px solid rgba(255,159,10,0.4); }
+    .control-btn.pause:hover { background: rgba(255,159,10,0.25); }
+    .control-btn.resume { background: rgba(52,199,89,0.15); color: #34C759; border: 1px solid rgba(52,199,89,0.4); }
+    .control-btn.resume:hover { background: rgba(52,199,89,0.25); }
 
     /* ── Trade list ── */
     .trade-row {
@@ -304,6 +331,13 @@
   <div id="content">
     <!-- Hjem -->
     <div class="screen active" id="screen-home">
+      <!-- Phase A5: Pause-banner + control button -->
+      <div id="pause-banner" class="pause-banner" style="display:none">
+        ⏸️ Trading PÅ PAUSE — exits kører stadig
+      </div>
+      <div class="control-row">
+        <button id="pause-btn" class="control-btn pause" onclick="togglePause()">⏸️ Pause Trading</button>
+      </div>
       <div class="stat-grid">
         <div class="stat">
           <div class="stat-label">Total Equity</div>
@@ -694,7 +728,7 @@ async function refreshAll() {
   const rbtn = document.getElementById('refresh-btn');
   rbtn.style.animation = 'spin 0.6s linear';
   setTimeout(() => rbtn.style.animation = '', 700);
-  await Promise.allSettled([loadHome(), loadPositions(), loadTrades(), loadSignals(), loadStatus()]);
+  await Promise.allSettled([loadHome(), loadPositions(), loadTrades(), loadSignals(), loadStatus(), loadPauseState()]);
 }
 
 // ── Formatters ────────────────────────────────────────────────
@@ -787,15 +821,88 @@ async function loadPositions() {
     el.innerHTML = data.map(p => `
       <div class="position-row">
         <div class="pos-left">
-          <div class="symbol">${p.symbol}</div>
-          <div class="qty">${p.qty} stk · ${fmtDKK(p.entry_price)}</div>
+          <div class="symbol">${p.symbol} <span style="font-size:10px;color:${p.side==='short'?'#FF9F0A':'#888'};font-weight:600;text-transform:uppercase">${p.side||''}</span></div>
+          <div class="qty">${p.qty} stk · entry ${fmtDKK(p.entry_price)}</div>
         </div>
         <div class="pos-right">
           <div class="value">${fmtDKK(p.market_value)}</div>
           <div class="pnl ${colorClass(p.unrealized_pnl)}">${fmtDKK(p.unrealized_pnl)} (${fmtPct(p.unrealized_pnl_pct)})</div>
         </div>
+        <button class="close-btn" onclick="closePosition('${p.symbol}',${p.qty},'${p.side||'long'}')" title="Sælg / luk position">✕</button>
       </div>`).join('');
   } catch(e) { el.innerHTML = '<div class="empty">Fejl ved hentning</div>'; }
+}
+
+// ── Pause control (Phase A5) ──────────────────────────────────
+async function loadPauseState() {
+  try {
+    const data = await api('/api/control/status');
+    setPauseUI(data.paused);
+  } catch (e) {
+    // Silently ignore — pause-feature kræver AutoTrader
+  }
+}
+
+function setPauseUI(paused) {
+  const banner = document.getElementById('pause-banner');
+  const btn = document.getElementById('pause-btn');
+  if (!btn) return;
+  if (paused) {
+    if (banner) banner.style.display = 'block';
+    btn.textContent = '▶️ Genoptag Trading';
+    btn.classList.remove('pause');
+    btn.classList.add('resume');
+  } else {
+    if (banner) banner.style.display = 'none';
+    btn.textContent = '⏸️ Pause Trading';
+    btn.classList.remove('resume');
+    btn.classList.add('pause');
+  }
+}
+
+async function togglePause() {
+  const btn = document.getElementById('pause-btn');
+  const isPaused = btn.classList.contains('resume');
+  const url = '/api/control/' + (isPaused ? 'resume' : 'pause');
+  if (!isPaused && !confirm('Pauser trading? Eksisterende exits/stop-loss vil stadig udløse.')) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch(BASE + url + '?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert('Fejl: ' + (data.detail || 'Kunne ikke ændre status'));
+      btn.disabled = false;
+      return;
+    }
+    setPauseUI(data.paused);
+  } catch (e) {
+    alert('Netværksfejl: ' + e.message);
+  }
+  btn.disabled = false;
+}
+
+async function closePosition(symbol, qty, side) {
+  const action = side === 'short' ? 'covre (købe tilbage)' : 'sælge';
+  if (!confirm(`Bekræft: ${action} ${qty} stk ${symbol}?\n\nDette sender en ordre direkte til Alpaca.`)) return;
+  try {
+    const res = await fetch(BASE + '/api/portfolio/close/' + encodeURIComponent(symbol) + '?_=' + Date.now(), {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert('Fejl: ' + (data.detail || 'Kunne ikke lukke position'));
+      return;
+    }
+    alert(`Ordre afsendt: ${data.qty} stk ${data.symbol} (${data.side})\nOrder ID: ${data.order_id || 'pending'}`);
+    await loadPositions();
+    await loadHome();
+  } catch (e) {
+    alert('Netværksfejl: ' + e.message);
+  }
 }
 
 // ── Trades ────────────────────────────────────────────────────

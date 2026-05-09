@@ -7603,71 +7603,100 @@ def update_nav_language(stored_lang, selected_lang):
     lang = selected_lang or stored_lang or "da"
     set_language(lang)
 
+    # Phase A6: Forenklet navigation. Dashboardet havde 20 sider — for mange
+    # for daglig trading. Standard er nu kun 4 hovedsider; ekstra sider er
+    # tilgængelige via "Avanceret"-collapsible. Kontrolleres via env var
+    # DASHBOARD_PAGES (komma-separeret liste). Default: hovedsider.
+    import os as _os
+    default_pages = "overview,portfolio,trading,risk,status,settings"
+    enabled = set(
+        s.strip() for s in _os.getenv("DASHBOARD_PAGES", default_pages).split(",")
+        if s.strip()
+    )
+    show_advanced = "advanced" in enabled or _os.getenv("DASHBOARD_ADVANCED", "false").lower() in ("1", "true", "yes")
+
+    # Hovedsider — kun ÅBNE pages der er i `enabled`
+    main_links = []
+    if "overview" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-speedometer2 me-2"), t("nav.overview", lang)],
+            href="/", active="exact", className="nav-dark"))
+    if "portfolio" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-pie-chart me-2"), t("nav.portfolio", lang)],
+            href="/portfolio", active="exact", className="nav-dark"))
+    if "trading" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-cart-check me-2"), t("nav.trading", lang)],
+            href="/trading", active="exact", className="nav-dark"))
+    if "risk" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-shield-check me-2"), t("nav.risk", lang)],
+            href="/risiko", active="exact", className="nav-dark"))
+    if "status" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-wifi me-2"), t("nav.broker_status", lang)],
+            href="/status", active="exact", className="nav-dark"))
+    if "settings" in enabled:
+        main_links.append(dbc.NavLink(
+            [html.I(className="bi bi-gear me-2"), t("nav.settings", lang)],
+            href="/settings", active="exact", className="nav-dark"))
+
+    # Avancerede sider — kun synlige hvis DASHBOARD_ADVANCED=true ELLER hvis
+    # specifikt aktiveret. Stadig accessable via direkte URL.
+    advanced_links = []
+    advanced_pages = [
+        ("/analyse", "bi bi-graph-up", "nav.stock_analysis"),
+        ("/strategier", "bi bi-robot", "nav.strategies"),
+        ("/skat", "bi bi-calculator", "nav.tax"),
+        ("/marked", "bi bi-globe2", "nav.market_overview"),
+        ("/markets", "bi bi-globe-americas", "nav.markets"),
+        ("/performance", "bi bi-file-earmark-pdf", "nav.reports"),
+        ("/sentiment", "bi bi-newspaper", "nav.sentiment"),
+        ("/kalender", "bi bi-calendar-event", "nav.calendar"),
+        ("/regime", "bi bi-activity", "nav.regime"),
+        ("/stress-test", "bi bi-lightning-charge", "nav.stress_test"),
+        ("/health", "bi bi-heart-pulse", "nav.system_health"),
+        ("/smart-money", "bi bi-bank", "nav.smart_money"),
+        ("/options-flow", "bi bi-bar-chart-steps", "nav.options_flow"),
+        ("/alt-data", "bi bi-stars", "nav.alt_data"),
+        ("/okonomi", "bi bi-globe-americas", "nav.economy"),
+        ("/tax", "bi bi-calculator", "nav.tax_center"),
+    ]
+    for href, icon, label_key in advanced_pages:
+        advanced_links.append(dbc.NavLink(
+            [html.I(className=f"{icon} me-2"), t(label_key, lang)],
+            href=href, active="exact", className="nav-dark"))
+
     trading_nav = html.Div([
-        html.P(t("nav.section_trading", lang), style={
+        html.P("ALPHA TRADER", style={
             "color": COLORS["accent"], "fontSize": "0.7rem", "fontWeight": "700",
             "letterSpacing": "2px", "padding": "12px 16px 4px", "marginBottom": 0,
         }),
-        dbc.Nav([
-            dbc.NavLink([html.I(className="bi bi-pie-chart me-2"), t("nav.portfolio", lang)],
-                         href="/portfolio", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-cart-check me-2"), t("nav.trading", lang)],
-                         href="/trading", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-calculator me-2"), t("nav.tax_center", lang)],
-                         href="/tax", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-globe2 me-2"), t("nav.markets", lang)],
-                         href="/markets", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-wifi me-2"), t("nav.broker_status", lang)],
-                         href="/status", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-file-earmark-pdf me-2"), t("nav.reports", lang)],
-                         href="/performance", active="exact", className="nav-dark"),
-        ], vertical=True, pills=True, style={"padding": "0 8px"}),
+        dbc.Nav(main_links, vertical=True, pills=True, style={"padding": "0 8px"}),
         html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 16px"}),
     ])
 
-    analysis_nav = html.Div([
-        html.P(t("nav.section_analysis", lang), style={
-            "color": COLORS["muted"], "fontSize": "0.7rem", "fontWeight": "700",
-            "letterSpacing": "2px", "padding": "4px 16px 4px", "marginBottom": 0,
-        }),
-        dbc.Nav([
-            dbc.NavLink([html.I(className="bi bi-speedometer2 me-2"), t("nav.overview", lang)],
-                         href="/", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-graph-up me-2"), t("nav.stock_analysis", lang)],
-                         href="/analyse", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-robot me-2"), t("nav.strategies", lang)],
-                         href="/strategier", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-shield-check me-2"), t("nav.risk", lang)],
-                         href="/risiko", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-calculator me-2"), t("nav.tax", lang)],
-                         href="/skat", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-globe2 me-2"), t("nav.market_overview", lang)],
-                         href="/marked", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-newspaper me-2"), t("nav.sentiment", lang)],
-                         href="/sentiment", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-calendar-event me-2"), t("nav.calendar", lang)],
-                         href="/kalender", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-activity me-2"), t("nav.regime", lang)],
-                         href="/regime", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-lightning-charge me-2"), t("nav.stress_test", lang)],
-                         href="/stress-test", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-heart-pulse me-2"), t("nav.system_health", lang)],
-                         href="/health", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-bank me-2"), t("nav.smart_money", lang)],
-                         href="/smart-money", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-bar-chart-steps me-2"), t("nav.options_flow", lang)],
-                         href="/options-flow", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-stars me-2"), t("nav.alt_data", lang)],
-                         href="/alt-data", active="exact", className="nav-dark"),
-            dbc.NavLink([html.I(className="bi bi-globe-americas me-2"), t("nav.economy", lang)],
-                         href="/okonomi", active="exact", className="nav-dark"),
-        ], vertical=True, pills=True, style={"padding": "0 8px"}),
-        html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 16px"}),
-        dbc.Nav([
-            dbc.NavLink([html.I(className="bi bi-gear me-2"), t("nav.settings", lang)],
-                         href="/settings", active="exact", className="nav-dark"),
-        ], vertical=True, pills=True, style={"padding": "0 8px"}),
-    ])
+    if show_advanced:
+        analysis_nav = html.Div([
+            html.P("⚙ AVANCERET", style={
+                "color": COLORS["muted"], "fontSize": "0.7rem", "fontWeight": "700",
+                "letterSpacing": "2px", "padding": "4px 16px 4px", "marginBottom": 0,
+            }),
+            dbc.Nav(advanced_links, vertical=True, pills=True, style={"padding": "0 8px"}),
+        ])
+    else:
+        # Skjult — vis kun en lille collapsible/info-tekst
+        analysis_nav = html.Div([
+            html.P([
+                "Avanceret menu skjult. Sæt ",
+                html.Code("DASHBOARD_ADVANCED=true"),
+                " i .env for at vise alle 16 research-sider."
+            ], style={
+                "color": COLORS["muted"], "fontSize": "0.7rem",
+                "padding": "8px 16px", "marginBottom": 0,
+            }),
+        ])
 
     return trading_nav, analysis_nav
 

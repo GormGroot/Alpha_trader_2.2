@@ -523,54 +523,72 @@ class AlphaScoreEngine:
         """
         ML-ensemble prediction score (0-100).
 
-        Bruger eksisterende ml_strategy og ensemble_ml_strategy.
+        Phase A2: Hvis ingen trænede modeller er tilgængelige, returneres
+        et SubScore med confidence=0 så det IKKE påvirker det vægtede
+        gennemsnit (calculate() bruger confidence-vægtet aggregation).
         """
         try:
             from src.strategy.ml_strategy import MLStrategy
             from src.strategy.ensemble_ml_strategy import EnsembleMLStrategy
+            from pathlib import Path
 
             scores_list: list[float] = []
             details: dict[str, Any] = {}
+            trained_models = 0
 
-            # 1. Basis ML
-            try:
-                ml = MLStrategy()
-                ml_result = ml.analyze(df)
-                if ml_result and ml_result.signal != Signal.HOLD:
-                    if ml_result.signal == Signal.BUY:
-                        ml_s = 50 + ml_result.confidence * 50
-                    else:  # SELL
-                        ml_s = 50 - ml_result.confidence * 50
-                    scores_list.append(max(0, min(100, ml_s)))
-                    details["ml_basic"] = round(ml_s, 1)
-                else:
-                    scores_list.append(50)
-                    details["ml_basic"] = 50
-            except Exception:
-                scores_list.append(50)
+            # 1. Basis ML — kun hvis trænet
+            ml_path = Path("models/ml_latest.joblib")
+            if ml_path.exists():
+                try:
+                    ml = MLStrategy.load(ml_path)
+                    if getattr(ml, "is_trained", False):
+                        trained_models += 1
+                        ml_result = ml.analyze(df)
+                        if ml_result and ml_result.signal != Signal.HOLD:
+                            if ml_result.signal == Signal.BUY:
+                                ml_s = 50 + ml_result.confidence * 50
+                            else:
+                                ml_s = 50 - ml_result.confidence * 50
+                            scores_list.append(max(0, min(100, ml_s)))
+                            details["ml_basic"] = round(ml_s, 1)
+                except Exception as exc:
+                    logger.debug(f"[alpha_score] ml_basic skip: {exc}")
 
-            # 2. Ensemble ML
-            try:
-                ensemble = EnsembleMLStrategy()
-                ens_result = ensemble.analyze(df)
-                if ens_result and ens_result.signal != Signal.HOLD:
-                    if ens_result.signal == Signal.BUY:
-                        ens_s = 50 + ens_result.confidence * 50
-                    else:
-                        ens_s = 50 - ens_result.confidence * 50
-                    scores_list.append(max(0, min(100, ens_s)))
-                    details["ml_ensemble"] = round(ens_s, 1)
-                else:
-                    scores_list.append(50)
-                    details["ml_ensemble"] = 50
-            except Exception:
-                scores_list.append(50)
+            # 2. Ensemble ML — kun hvis trænet
+            ens_path = Path("models/ensemble_latest.joblib")
+            if ens_path.exists():
+                try:
+                    ensemble = EnsembleMLStrategy.load(ens_path)
+                    if getattr(ensemble, "is_trained", False):
+                        trained_models += 1
+                        ens_result = ensemble.analyze(df)
+                        if ens_result and ens_result.signal != Signal.HOLD:
+                            if ens_result.signal == Signal.BUY:
+                                ens_s = 50 + ens_result.confidence * 50
+                            else:
+                                ens_s = 50 - ens_result.confidence * 50
+                            scores_list.append(max(0, min(100, ens_s)))
+                            details["ml_ensemble"] = round(ens_s, 1)
+                except Exception as exc:
+                    logger.debug(f"[alpha_score] ml_ensemble skip: {exc}")
 
-            score = statistics.mean(scores_list)
-            confidence = 0.6 if len(scores_list) >= 2 else 0.3
+            if trained_models == 0:
+                # Ingen trænede modeller — returnér confidence=0 så det ekskluderes
+                # fra weighted average i calculate()
+                return SubScore(
+                    name="ml_prediction",
+                    score=50.0,
+                    weight=self._weights.get("ml_prediction", 0.20),
+                    confidence=0.0,
+                    details={"trained_models": 0},
+                    explanation="ML-modeller ikke trænet — ekskluderet fra score",
+                )
+
+            score = statistics.mean(scores_list) if scores_list else 50.0
+            confidence = min(1.0, trained_models / 2.0)
 
             explanation = (
-                f"ML prediction: {score:.0f}/100. "
+                f"ML prediction: {score:.0f}/100 ({trained_models} trænede modeller). "
                 f"Basis={details.get('ml_basic', 'N/A')}, "
                 f"Ensemble={details.get('ml_ensemble', 'N/A')}"
             )
@@ -586,11 +604,11 @@ class AlphaScoreEngine:
 
         except ImportError:
             logger.debug("[alpha_score] ML moduler ikke tilgængelige")
-            return SubScore("ml_prediction", 50.0, 0.20, 0.1,
-                            explanation="ML moduler ikke trænede/tilgængelige")
+            return SubScore("ml_prediction", 50.0, 0.20, 0.0,
+                            explanation="ML moduler ikke installeret")
         except Exception as exc:
             logger.warning(f"[alpha_score] ML score fejl for {symbol}: {exc}")
-            return SubScore("ml_prediction", 50.0, 0.20, 0.1,
+            return SubScore("ml_prediction", 50.0, 0.20, 0.0,
                             explanation=f"Fejl: {exc}")
 
     def _macro_score(self, symbol: str, df: pd.DataFrame) -> SubScore:
