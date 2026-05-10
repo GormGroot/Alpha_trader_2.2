@@ -11,13 +11,28 @@ Fuldautomatisk trading-platform i Python 3.14. Multi-broker, multi-strategi, 24/
 - **Gorm** — primær Python-udvikler, ejer GitHub-repo
 - **HC** — Ole's far, del af trading-teamet
 
-## Platform Status (april 2026)
-- **Tests:** 1737+ grønne (1720 + 17 nye sikkerhedstests)
-- **Broker:** Alpaca paper trading aktiv ($100k paper, ACTIVE)
+## Platform Status (10. maj 2026 — Vej A komplet)
+- **Tests:** 2055+ grønne (1737 baseline + 19 fra Vej A circuit/duplikat)
+- **Broker:** Alpaca paper trading aktiv ($99k aktuel, 11 positioner)
 - **API keys:** `.env` (ikke i git)
-- **Fase:** Fase 2 af live-trading-plan gennemført ✅
-- **Mobile API:** http://localhost:8051 (PWA + REST + 2FA)
-- **Dashboard:** http://localhost:8050 (Dash, separat HTTP Basic auth)
+- **Fase:** Vej A.7 (parameter-optimering) komplet, klar til 5-7 dages paper
+- **Mobile API:** http://localhost:8051 (PWA + REST + 2FA + pause/sælg-knapper)
+- **Dashboard:** http://localhost:8050 (forenklet til 6 hovedsider)
+
+### Strategi (efter param-sweep)
+- **SMA 50/200** (vægt 0.45) — Golden/Death Cross, PF 17.86, MaxDD 3.5%, Sharpe 2.10
+- **RSI 14, 35/65** (vægt 0.35) — Loose tærskler, PF 5.20, WR 77%
+- **Combined** (vægt 0.20) — vægtet konsensus af de to ovenstående
+- **Inaktive:** ML, EnsembleML (utrænede modeller — afventer Gorm)
+
+### Vej A audit-fixes (commit 6a7592a + 7c0866a)
+1. **A1:** PWA viser direkte Alpaca-positioner (ikke lokal SQLite drift)
+2. **A2:** Utrænede ML-strategier deaktiveret (var 60% død vægt)
+3. **A3:** Circuit breakers verificeret + equity sync fra broker
+4. **A4:** Duplikat-handler blokeret (fase 3/4 isolation + DB-idempotency)
+5. **A5:** PWA Pause-knap + ✕-knap pr. position + Telegram-notifikation
+6. **A6:** Dashboard 20 → 6 hovedsider
+7. **A7:** Strategi-parametre optimeret efter 30-symbol param-sweep
 
 ### Sikkerhed (login)
 - **Lag 1:** Username + password (konstant-tids sammenligning, bcrypt-kompatibel)
