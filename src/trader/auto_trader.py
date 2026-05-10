@@ -625,16 +625,21 @@ class AutoTrader:
         return None
 
     def _build_strategies(self) -> list[tuple]:
+        # Phase A7 (10/5-2026 backtest): Parametre opdateret efter sweep på
+        # 30 store-cap symboler over 2 år. Vinder-konfigurationer:
+        #   SMA 50/200 (Golden/Death Cross): PF 17.9, WR 70.6%, MaxDD 3.5%
+        #   RSI 35/65 p14 (loose):           PF 5.20, WR 77.0%, MaxDD 14.0%
+        # Tidligere defaults (SMA 20/50, RSI 30/70) gav PF 0.60 på 5 symboler.
         strats = []
         try:
-            rsi = RSIStrategy()
-            strats.append((rsi, 0.30))
+            rsi = RSIStrategy(period=14, oversold=35, overbought=65)
+            strats.append((rsi, 0.35))
         except Exception as e:
             logger.warning(f"[auto] RSI strategy failed: {e}")
 
         try:
-            sma = SMACrossoverStrategy()
-            strats.append((sma, 0.30))
+            sma = SMACrossoverStrategy(short_window=50, long_window=200)
+            strats.append((sma, 0.45))  # Højeste vægt — bedst risk-adjusted i backtest
         except Exception as e:
             logger.warning(f"[auto] SMA strategy failed: {e}")
 
@@ -644,7 +649,7 @@ class AutoTrader:
                     strategies=[(s, w) for s, w in strats],
                     min_agreement=1,
                 )
-                strats.append((combined, 0.40))
+                strats.append((combined, 0.20))
         except Exception as e:
             logger.warning(f"[auto] Combined strategy failed: {e}")
 
